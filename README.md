@@ -38,10 +38,25 @@ python main.py --niche saas --max 100 --out data/leads.json
 python main.py                      # all niches, default limits
 ```
 
+### Zero-search-discovery mode (guaranteed, works everywhere)
+
+If the free engines are bot-checking your IP, still scrape today using your
+own shortlist of business websites:
+
+```bash
+python main.py --seeds data/seeds.example.txt --niche real_estate --max 10 --out data/leads.csv
+```
+
+`--seeds` takes a file with one URL per line (`#` comments and blank lines are
+ignored), runs every URL through the exact same fetch → filter → extract →
+export pipeline, and **bypasses search engines completely**. Pair it with any
+method of finding websites (Google Maps, directories, your own research).
+
 Discovery works **out of the box with zero API keys** using the built-in
-free Bing + DuckDuckGo + Mojeek clients (Bing first, with each subsequent
-engine failing over gracefully if one bot-checks your IP). SerpAPI and
-ScrapingBee are optional upgrades auto-detected when their keys are present.
+free Bing-RSS + DuckDuckGo + Bing + Mojeek clients, failing over gracefully
+when an engine bot-checks your IP (challenge/captcha pages are detected and
+skipped). SerpAPI and ScrapingBee are optional upgrades auto-detected when
+their keys are present.
 
 ## API keys (optional)
 
@@ -56,8 +71,8 @@ ScrapingBee are optional upgrades auto-detected when their keys are present.
 ## How it works
 
 ```
-niche queries ──▶ Bing / DuckDuckGo / Mojeek (free) or SerpAPI ──▶ business URLs
-        │
+niche queries ──▶ DuckDuckGo / Bing-RSS / Bing / Mojeek (free) or SerpAPI ──▶ business URLs
+        │                     or --seeds <url-list-file>
         ▼
 fetch page (proxy-rotated, rate-limited, retry w/ backoff)
         │
@@ -68,10 +83,10 @@ ScrapingBee render if empty/JS-only (optional)
 URL deny-list → extract emails · wa.me numbers · @instagram · linkedin · phones
         │
         ▼
-in-niche keyword filter + exclusion rules
+in-niche keyword filter + exclusion + corporate/portal/education rules
         │
         ▼
-dedupe → CSV / JSON export
+dedupe (by website) → CSV / JSON export
 ```
 
 ## Project layout

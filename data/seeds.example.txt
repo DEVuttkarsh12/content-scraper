@@ -1,0 +1,9 @@
+# One business website per line (comments with # and blank lines are ignored).
+# Used with: python main.py --seeds data/seeds.example.txt --niche real_estate --max 10
+# Websites that block bots (403/429) are skipped automatically.
+https://www.theagencyre.com
+https://trulinerealty.com
+https://www.xrealty.ae
+https://larealestateagency.com
+https://www.compass.com
+https://www.kellerwilliams.com

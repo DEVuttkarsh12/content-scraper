@@ -23,6 +23,7 @@ from sources.page import (
 )
 from sources.search import (
     BingClient,
+    BingRssClient,
     DuckDuckGoClient,
     MojeekClient,
     RenderClient,
@@ -56,11 +57,14 @@ class SearchSource:
         self.settings = settings
         self.session = build_session(settings)
         self.search = SearchClient(settings)
-        self.bing = BingClient(settings, session=self.session)
         self.ddg = DuckDuckGoClient(settings, session=self.session)
+        self.bing_rss = BingRssClient(settings, session=self.session)
+        self.bing = BingClient(settings, session=self.session)
         self.mojeek = MojeekClient(settings, session=self.session)
         self.renderer = RenderClient(settings)
-        self.free_engines = [self.bing, self.ddg, self.mojeek]
+        # Free engines in fallback order. DuckDuckGo and Bing RSS are the most
+        # bot-tolerant; HTML Bing and Mojeek are backups when both are blocked.
+        self.free_engines = [self.ddg, self.bing_rss, self.bing, self.mojeek]
 
     def _discover(self, query: str, num: int = 10) -> list:
         """Try paid engine first, then each free engine until results."""
@@ -123,6 +127,44 @@ class SearchSource:
                 leads.append(lead)
                 logger.debug("Lead: %s (%s contact points)", name, _contact_count(contact))
 
+        return leads
+
+    def collect_seeds(self, niche: Niche, urls: list, max_leads: int = 20) -> list:
+        """Harvest leads from a caller-provided list of business URLs.
+
+        Skips search discovery entirely — useful when the user has already
+        shortlisted sites (see main.py --seeds) or search engines are blocked.
+        """
+        leads: list = []
+        seen: set = set()
+        for url in urls:
+            if len(leads) >= max_leads:
+                break
+            url = (url or "").strip()
+            if not url:
+                continue
+            if not url.startswith("http"):
+                url = "https://" + url
+            if (
+                not is_page_url(url)
+                or url_is_denied(url)
+                or url in seen
+            ):
+                continue
+            seen.add(url)
+            contact, name = self._process_url(url, niche)
+            if contact is None:
+                continue
+            lead = Lead.from_contact(
+                business_name=name or "Unknown",
+                niche=niche.id,
+                website=url,
+                contact=contact,
+                source_query="seed",
+            )
+            if lead.has_contact:
+                leads.append(lead)
+                logger.debug("Seed lead: %s (%s contact points)", name, _contact_count(contact))
         return leads
 
     def _process_url(self, url: str, niche: Niche):

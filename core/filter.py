@@ -14,6 +14,12 @@ DENY_HOSTS = {
     "thefreedictionary.com", "vocabulary.com", "urbandictionary.com",
     "investopedia.com", "britannica.com",
     "businessnewsdaily.com", "forbes.com", "entrepreneur.com",
+    # Tech tutorial / content farms (never an outreach lead)
+    "geeksforgeeks.org", "tutorialspoint.com", "javatpoint.com",
+    "w3schools.com", "stackoverflow.com", "stackexchange.com",
+    "medium.com", "searchenginejournal.com", "neilpatel.com",
+    "businessinsider.com", "techcrunch.com", "theverge.com",
+    "howtogeek.com", "sciencedirect.com", "springer.com", "mdpi.com",
     # Social / content platforms
     "youtube.com", "youtu.be", "facebook.com", "twitter.com", "x.com",
     "instagram.com", "tiktok.com", "reddit.com", "quora.com", "pinterest.com",
@@ -44,6 +50,8 @@ DENY_HOSTS = {
     # Corporate / directory data portals
     "opencorporates.com", "crunchbase.com", "zoominfo.com", "datanyze.com",
     "leadfeeder.com", "kompass.com", "g2.com", "trustpilot.com",
+    # Government / municipal tax & civic portals
+    "punecorporation.org", "nagarpalika", "municipal",
 }
 
 SUFFIX_DENY = (".gov", ".gov.in", ".mil", ".edu")

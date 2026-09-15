@@ -31,7 +31,10 @@ NICHES: dict[str, Niche] = {
             "real estate", "property", "realtor", "realty",
             "estate agent", "brokerage", "condos", "villas",
         ],
-        exclusion_keywords=["for sale by owner", "rental listings aggregator"],
+        exclusion_keywords=[
+            "for sale by owner", "rental listings aggregator",
+            "property tax", "municipal corporation", "ward office",
+        ],
     ),
     "finance": Niche(
         id="finance",

@@ -198,11 +198,18 @@ def extract_instagram_handles(links: list | None = None, text: str = "") -> list
 
 
 def extract_linkedin_urls(links: list | None = None, text: str = "") -> list:
-    """Extract LinkedIn company/profile URLs."""
+    """Extract LinkedIn company/profile URLs.
+
+    URLs are normalised (https, no trailing slash) so http/https and
+    `/company/x` vs `/company/x/` variants collapse onto a single entry.
+    """
     results = set()
     for source in list(links or []) + [text]:
         for match in LINKEDIN_URL_RE.findall(source):
             url = match.rstrip(".,;:)'\"")
+            url = url.replace("http://", "https://", 1)
+            url = url.replace("https://www.linkedin.com", "https://linkedin.com", 1)
+            url = url.rstrip("/")
             results.add(url)
     return sorted(results)
 

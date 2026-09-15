@@ -2,6 +2,7 @@
 
 Barebone scaffold:
   python main.py --niche real_estate finance --max 50 --out data/leads.csv
+  python main.py --seeds data/seeds.txt --niche real_estate
   python main.py --list-niches
   python main.py --dry-run --niche saas --max 5
 """
@@ -14,7 +15,7 @@ from config.niches import all_niche_ids, load_niches
 from config.settings import get_settings
 from core.models import CSV_HEADERS
 from sources.collector import SearchSource
-from output.exporter import export_leads
+from output.exporter import dedupe_leads, export_leads
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Validate config, extractors, and pipeline wiring without scraping.",
     )
     p.add_argument(
+        "--seeds",
+        metavar="FILE",
+        help="Optional file of business URLs to scrape directly (one URL per "
+             "line, # comments/blank lines ignored). Bypasses search engines.",
+    )
+    p.add_argument(
         "--verbose",
         action="store_true",
         help="Enable debug logging.",
@@ -63,6 +70,17 @@ def list_niches() -> None:
         niche = load_niches([nid])[0]
         print(f"  {nid:15s} -> {niche.label}")
     print("\nExample: python main.py --niche real_estate finance --max 50 --out data/leads.csv")
+
+
+def load_seed_urls(path: str) -> list:
+    urls = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            urls.append(line)
+    return urls
 
 
 def run_dry_run(settings) -> int:
@@ -138,12 +156,25 @@ def main(argv=None) -> int:
     source = SearchSource(settings)
     all_leads = []
 
-    for niche in niches:
-        print(f"\n== Scraping niche: {niche.label} ==")
-        leads = source.collect(niche, max_leads=args.max)
-        all_leads.extend(leads)
-        print(f"  collected {len(leads)} qualified leads for {niche.id}")
+    if args.seeds:
+        seed_urls = load_seed_urls(args.seeds)
+        if not seed_urls:
+            print(f"No URLs found in {args.seeds}", file=sys.stderr)
+            return 1
+        print(f"Loaded {len(seed_urls)} seed URLs from {args.seeds}")
+        for niche in niches:
+            print(f"\n== Scraping niches from seed URLs: {niche.label} ==")
+            leads = source.collect_seeds(niche, seed_urls, max_leads=args.max)
+            all_leads.extend(leads)
+            print(f"  collected {len(leads)} qualified leads for {niche.id}")
+    else:
+        for niche in niches:
+            print(f"\n== Scraping niche: {niche.label} ==")
+            leads = source.collect(niche, max_leads=args.max)
+            all_leads.extend(leads)
+            print(f"  collected {len(leads)} qualified leads for {niche.id}")
 
+    all_leads = dedupe_leads(all_leads)
     export_leads(all_leads, args.out)
     print(f"\nDone. Wrote {len(all_leads)} leads to {args.out}")
     return 0
