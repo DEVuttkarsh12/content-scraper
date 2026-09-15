@@ -1,0 +1,78 @@
+"""Central settings loader. Reads .env and exposes typed config."""
+
+import os
+import random
+from dataclasses import dataclass, field
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _env_bool(key: str, default: bool = False) -> bool:
+    val = os.getenv(key)
+    if val is None:
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+@dataclass(frozen=True)
+class ScraperSettings:
+    """Runtime settings for the scraper engine."""
+
+    serpapi_key: str = os.getenv("SERPAPI_KEY", "")
+    scrapingbee_key: str = os.getenv("SCRAPINGBEE_API_KEY", "")
+    proxies: list = field(
+        default_factory=lambda: [
+            p.strip()
+            for p in os.getenv("PROXY_LIST", "").split(",")
+            if p.strip()
+        ]
+    )
+
+    request_delay_min: float = _env_float("REQUEST_DELAY_MIN", 1.5)
+    request_delay_max: float = _env_float("REQUEST_DELAY_MAX", 3.5)
+    timeout_seconds: int = _env_int("TIMEOUT_SECONDS", 20)
+    max_concurrent_requests: int = _env_int("MAX_CONCURRENT_REQUESTS", 4)
+    user_agent_rotate: bool = _env_bool("USER_AGENT_ROTATE", True)
+    max_retries: int = _env_int("MAX_RETRIES", 2)
+    search_country: str = os.getenv("SEARCH_COUNTRY", "us").strip().lower()
+
+    @property
+    def has_serpapi(self) -> bool:
+        return bool(self.serpapi_key)
+
+    @property
+    def has_scrapingbee(self) -> bool:
+        return bool(self.scrapingbee_key)
+
+    @property
+    def has_proxies(self) -> bool:
+        return len(self.proxies) > 0
+
+    @property
+    def delay_between_requests(self) -> float:
+        return round(
+            random.uniform(self.request_delay_min, self.request_delay_max), 2
+        )
+
+
+SETTINGS = ScraperSettings()
+
+
+def get_settings() -> ScraperSettings:
+    return SETTINGS

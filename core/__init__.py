@@ -1,0 +1,1 @@
+"""Core package: models, extraction, networking, filtering."""
