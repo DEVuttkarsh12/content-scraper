@@ -22,10 +22,10 @@ NICHES: dict[str, Niche] = {
         id="real_estate",
         label="Real Estate & Property Development",
         search_queries=[
-            '"real estate agency" contact us',
-            '"property development" company "contact"',
-            '"real estate broker" "let\'s talk" OR "get in touch"',
-            '"estate agents" "our offices"',
+            '"real estate" brokerage "contact us" -zillow -trulia -realtor.com',
+            '"estate agency" "our team" "email"',
+            '"realty" "search homes" "contact" -"for rent" -zillow',
+            '"buying" "selling" "real estate" "get in touch"',
         ],
         scope_keywords=[
             "real estate", "property", "realtor", "realty",
@@ -40,10 +40,10 @@ NICHES: dict[str, Niche] = {
         id="finance",
         label="Wealth Management & Finance",
         search_queries=[
-            '"wealth management" firm "contact"',
-            '"financial adviser" "email"',
-            '"investment advisory" "office" "contact us"',
-            '"private client" "asset management" "get in touch"',
+            '"wealth management" "our team" "contact" -investopedia -morgan',
+            '"financial advisor" "office" "contact us" -investopedia',
+            '"investment advisory" "about us" "contact"',
+            '"financial planning" firms "get in touch"',
         ],
         scope_keywords=[
             "wealth", "financial", "investment", "asset management",
@@ -56,10 +56,10 @@ NICHES: dict[str, Niche] = {
         id="healthcare",
         label="Private Healthcare & Clinics",
         search_queries=[
-            '"medical practice" "contact" "appointments"',
-            '"cosmetic clinic" "book online"',
-            '"dental practice" "contact us"',
-            '"private clinic" "our doctors"',
+            '"cosmetic clinic" "book" "contact" -nhs -doctors.org',
+            '"private clinic" "our doctors" "contact us"',
+            '"dental practice" "new patients" "contact"',
+            '"aesthetic clinic" "before and after" "contact"',
         ],
         scope_keywords=[
             "clinic", "medical", "dentistry", "dental", "dermatology",
@@ -71,10 +71,10 @@ NICHES: dict[str, Niche] = {
         id="legal",
         label="Law Firms & Legal Services",
         search_queries=[
-            '"law firm" "contact" "attorney"',
-            '"corporate law" firms "office"',
-            '"business lawyers" "get in touch"',
-            '"legal" "firm" "approach us"',
+            '"law firm" "attorneys" "contact" -legalaid',
+            '"business law" firm "get in touch"',
+            '"corporate lawyers" "our team" "contact"',
+            '"law firm" "practice areas" "contact us"',
         ],
         scope_keywords=[
             "law firm", "attorney", "lawyers", "legal", "solicitors",
@@ -86,10 +86,10 @@ NICHES: dict[str, Niche] = {
         id="saas",
         label="SaaS & Software Companies",
         search_queries=[
-            '"software" "company" "contact sales"',
-            '"saas" "platform" "talk to sales"',
-            '"b2b" "software" "request a demo"',
-            '"cloud" "solutions" "our team"',
+            '"software" company "request a demo"',
+            '"saas" "schedule a demo" "contact"',
+            '"b2b" "software product" "book a demo"',
+            '"platform" "talk to sales" "pricing"',
         ],
         scope_keywords=[
             "software", "saas", "platform", "cloud", "solutions",
@@ -101,10 +101,10 @@ NICHES: dict[str, Niche] = {
         id="ecommerce",
         label="E-commerce & D2C Brands",
         search_queries=[
-            '"online store" "contact" "brand"',
-            '"d2c" "brand" "contact us"',
-            '"ecommerce" "shipping" "about us"',
-            '"retail" "brand" "support"',
+            '"d2c" brand "contact us" -flipkart -amazon',
+            '"online store" "about us" "contact" -shopify -ebay',
+            '"direct to consumer" brand "our story"',
+            '"ecommerce" brand "customer support"',
         ],
         scope_keywords=[
             "shop", "store", "brand", "d2c", "retail",
@@ -116,10 +116,10 @@ NICHES: dict[str, Niche] = {
         id="coaching",
         label="High-Ticket Coaching & Consulting",
         search_queries=[
-            '"business coach" "work with me"',
-            '"executive coaching" "contact"',
+            '"business coach" "work with me" -fitness -diet',
+            '"executive coach" programs "contact"',
             '"consulting" "our clients" "contact us"',
-            '"mentorship" "program" "apply"',
+            '"consultancy" "services" "contact" firm',
         ],
         scope_keywords=[
             "coach", "consulting", "consultancy", "mentor",
@@ -131,9 +131,10 @@ NICHES: dict[str, Niche] = {
         id="automotive",
         label="Luxury Automotive & Dealerships",
         search_queries=[
-            '"luxury car" "dealership" "contact"',
-            '"exotic cars" "inventory"',
-            '"dealer" "luxury" "visit us"',
+            '"luxury" dealership "inventory" "contact"',
+            '"exotic cars" dealership "showroom"',
+            'dealership "our team" "book a test drive"',
+            '"luxury" cars "our showroom" "visit us"',
         ],
         scope_keywords=[
             "dealership", "luxury cars", "exotic cars", "auto",
@@ -145,10 +146,10 @@ NICHES: dict[str, Niche] = {
         id="hospitality",
         label="Luxury Hospitality & Hotels",
         search_queries=[
-            '"boutique hotel" "contact"',
-            '"luxury resort" "reservations"',
-            '"five star" "hotel" "contact us"',
-            '"fine dining" "restaurant" "book a table"',
+            '"boutique hotel" "reservations" "contact" -booking.com -airbnb',
+            '"luxury resort" "our rooms" "contact"',
+            '"fine dining" "reservations" "contact" -eventbrite',
+            'hotel group "our hotels" "contact us"',
         ],
         scope_keywords=[
             "hotel", "resort", "hospitality", "boutique hotel",

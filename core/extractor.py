@@ -6,6 +6,7 @@ CSS class names, and audit scripts from polluting the leads.
 """
 
 import re
+from urllib.parse import unquote
 
 from core.models import ContactInfo
 
@@ -28,6 +29,18 @@ OBFUSCATED_EMAIL_RE = re.compile(
 PHONE_RE = re.compile(
     r"(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?)?\d{3}[\s.-]?\d{3}[\s.-]?\d{3,4}",
 )
+
+# Common 1-3 digit country calling codes used to sanity-check long numbers.
+CALLING_CODES = {
+    "1", "7", "20", "27", "30", "31", "32", "33", "34", "36", "39", "40",
+    "41", "43", "44", "45", "46", "47", "48", "49", "51", "52", "53", "54",
+    "55", "56", "57", "58", "60", "61", "62", "63", "64", "65", "66", "81",
+    "82", "84", "86", "90", "91", "92", "93", "94", "95", "98", "212", "213",
+    "234", "351", "352", "353", "354", "355", "356", "357", "358", "359",
+    "370", "371", "372", "373", "374", "375", "376", "377", "380", "381",
+    "385", "386", "387", "420", "421", "971", "972", "973", "974", "975",
+    "976", "966", "971", "974",
+}
 
 # WhatsApp links embedded in href attrs: wa.me/NNN or api.whatsapp.com/send?phone=NNN
 WHATSAPP_LINK_RE = re.compile(
@@ -69,6 +82,15 @@ NOISE_DOMAINS = {
     "example.com", "sentry.io", "domain.com", "email.com",
     "yourdomain.com", "wordpress.com", "gravatar.com",
 }
+
+# Cloudflare email-protection (data-cfemail) obfuscated addresses.
+CFEMAIL_RE = re.compile(r'data-cfemail="([0-9a-fA-F]+)"')
+
+# URL-encoded emails like info%40example%2Ecom.
+PERCENT_EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+-]+%40[A-Za-z0-9._%-]+",
+    re.IGNORECASE,
+)
 
 # Email domains that are never an outreach lead.
 EMAIL_SUFFIX_DENY = (".gov", ".gov.in", ".mil")
@@ -166,14 +188,64 @@ def extract_whatsapp_numbers(links: list | None = None, text: str = "") -> list:
     return sorted(results)
 
 
+def _is_plausible_phone(digits: str) -> bool:
+    """Sanity-check a cleaned digit string as a real phone number.
+
+    Rules:
+      - 10 digits: accepted (US/CA or mobile without country code).
+      - 11 digits: accepted only when the leading digit is a valid calling
+        code (1 for NANP, 7 for Russia/Kazakhstan).
+      - 12-15 digits: accepted only when the leading 1-3 digits match a
+        known calling code.
+      - Longer or leading-zero-heavy strings are rejected.
+    """
+    n = len(digits)
+    if n == 10:
+        return True
+    if n == 11:
+        return digits[0] in ("1", "7")
+    if 12 <= n <= 15:
+        return any(
+            digits.startswith(code)
+            for code in CALLING_CODES
+            if len(code) in (2, 3)
+        ) or (n == 12 and digits[0] == "1")
+    return False
+
+
+def _dedupe_phones(numbers: list) -> list:
+    """Drop bare local numbers when the international version is also listed."""
+    result = []
+    for num in sorted(numbers, key=len, reverse=True):
+        is_superstring = any(num.strip("+") in other for other in result)
+        if not is_superstring:
+            result.append(num)
+    return sorted(result)
+
+
 def extract_phones(text: str) -> list:
-    """Extract raw phone numbers (fallback when no WhatsApp link)."""
+    """Extract raw phone numbers (fallback when no WhatsApp link).
+
+    Filters out garbage matches: sequences of repeated digits, numbers
+    starting with too many zeros, and numeric strings that are really
+    years, prices, or hex codes.
+    """
     results = set()
     for match in PHONE_RE.findall(text):
         digits = _clean_phone(match)
-        if 10 <= len(digits) <= 15:
-            results.add(digits)
-    return sorted(results)
+        if not _is_plausible_phone(digits):
+            continue
+        # Reject if mostly zeros (e.g. "0000000000").
+        if digits.count("0") > len(digits) * 0.5:
+            continue
+        # Reject all-same-digit strings ("11111111111").
+        if len(set(digits)) <= 2:
+            continue
+        # Reject sequences that are just years or small numbers padded.
+        if digits.startswith("00"):
+            continue
+        results.add(digits)
+    return _dedupe_phones(sorted(results))
 
 
 def extract_instagram_handles(links: list | None = None, text: str = "") -> list:
@@ -218,9 +290,80 @@ def extract_all(*, text: str = "", links: list | None = None) -> ContactInfo:
     """Extract every contact type from visible text + anchor links."""
     info = ContactInfo()
     info.emails = extract_emails(text)
+    # Also pull emails from mailto: hrefs in the links list.
+    mailto_emails = set()
+    for link in links or []:
+        if link.lower().startswith("mailto:"):
+            email = link[7:].split("?")[0].strip().lower()
+            if "@" in email and _is_valid_email(email):
+                mailto_emails.add(email)
+    info.emails = sorted(set(info.emails) | mailto_emails)
     info.whatsapp_numbers = extract_whatsapp_numbers(links=links, text=text)
     info.instagram_handles = extract_instagram_handles(links=links, text=text)
     info.linkedin_urls = extract_linkedin_urls(links=links, text=text)
     if not info.whatsapp_numbers:
         info.phones = extract_phones(text)
+    return info
+
+
+def decode_cloudflare_email(hex_data: str) -> str | None:
+    """Decode a Cloudflare email-protection string.
+
+    Cloudflare XOR-encodes the address one byte at a time; the first byte is
+    the key. ``data-cfemail="2a3f333..."`` -> back to plaintext email.
+    """
+    try:
+        h = (hex_data or "").strip()
+        if len(h) < 4 or len(h) % 2 != 0:
+            return None
+        key = int(h[:2], 16)
+        out = []
+        for i in range(2, len(h), 2):
+            out.append(chr(int(h[i : i + 2], 16) ^ key))
+        email = "".join(out).strip()
+        if "@" in email and "." in email.split("@")[-1]:
+            return email
+    except ValueError:
+        return None
+    return None
+
+
+def extract_cloudflare_emails(html: str) -> list:
+    """Recover emails hidden behind Cloudflare's data-cfemail shields."""
+    results = set()
+    for match in CFEMAIL_RE.findall(html or ""):
+        email = decode_cloudflare_email(match)
+        if email:
+            cleaned = _clean_email(email)
+            if _is_valid_email(cleaned):
+                results.add(cleaned)
+    return sorted(results)
+
+
+def extract_encoded_emails(html: str) -> list:
+    """Recover URL-encoded emails like ``info%40example%2Ecom``."""
+    results = set()
+    for match in PERCENT_EMAIL_RE.findall(html or ""):
+        try:
+            decoded = unquote(match)
+        except Exception:  # noqa: BLE001
+            continue
+        cleaned = _clean_email(decoded)
+        if "@" in cleaned and _is_valid_email(cleaned):
+            results.add(cleaned)
+    return sorted(results)
+
+
+def extract_from_html(html: str) -> ContactInfo:
+    """Extract emails that live in raw HTML rather than visible text.
+
+    Catches Cloudflare-protected addresses and percent-encoded variants so
+    we grab a site's email even when it is hidden from the rendered page.
+    """
+    info = ContactInfo()
+    if not html:
+        return info
+    info.emails = sorted(
+        set(extract_cloudflare_emails(html)) | set(extract_encoded_emails(html))
+    )
     return info

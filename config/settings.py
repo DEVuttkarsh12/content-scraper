@@ -51,6 +51,22 @@ class ScraperSettings:
     user_agent_rotate: bool = _env_bool("USER_AGENT_ROTATE", True)
     max_retries: int = _env_int("MAX_RETRIES", 2)
     search_country: str = os.getenv("SEARCH_COUNTRY", "us").strip().lower()
+    verify_emails: bool = _env_bool("VERIFY_EMAILS", True)
+    # Free-lite options (all default-on so it works with zero keys).
+    free_js_render: bool = _env_bool("FREE_JS_RENDER", True)
+    cache_search: bool = _env_bool("CACHE_SEARCH", True)
+    cache_search_hours: int = _env_int("CACHE_SEARCH_HOURS", 168)
+    searx_instances: list = field(
+        default_factory=lambda: [
+            i.strip()
+            for i in os.getenv(
+                "SEARX_INSTANCES",
+                "https://searx.be,https://priv.au,https://search.bus-hit.me,"
+                "https://searx.tiekoetter.com,https://paulgo.io,https://search.hbubli.cc",
+            ).split(",")
+            if i.strip()
+        ]
+    )
 
     @property
     def has_serpapi(self) -> bool:

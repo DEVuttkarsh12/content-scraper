@@ -88,21 +88,31 @@ class Session:
                 )
                 if resp.status_code == 429 and attempt < max_retries:
                     logger.warning("Rate limited on %s, backing off", url)
-                    time.sleep(delay * 2 * (attempt + 1))
+                    time.sleep(min(delay * (attempt + 1), 8))
                     continue
                 # Treat proxy permission errors as retriable.
                 if resp.status_code in (403, 407) and attempt < max_retries:
                     logger.warning("Blocked (%s) on %s, rotating proxy", resp.status_code, url)
                     time.sleep(delay)
                     continue
+                # Don't retry other 4xx client errors (404, 410, etc.).
+                if 400 <= resp.status_code < 500:
+                    raise requests.HTTPError(
+                        f"{resp.status_code} Client Error for url: {url}",
+                        response=resp,
+                    )
                 resp.raise_for_status()
                 return resp
             except requests.RequestException as exc:  # noqa: PERF203
+                # 4xx errors are not retriable; 5xx/transport errors retry.
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status is not None and 400 <= status < 500:
+                    raise exc
                 last_exc = exc
                 logger.debug("Request failed (%s): %s", url, exc)
                 if attempt < max_retries:
                     self._proxies.mark_failed(proxies["http"]) if proxies else None
-                    time.sleep(delay * (attempt + 1))
+                    time.sleep(min(delay * (attempt + 1), 8))
                     continue
         if last_exc:
             raise last_exc

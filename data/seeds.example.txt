@@ -1,9 +1,19 @@
 # One business website per line (comments with # and blank lines are ignored).
 # Used with: python main.py --seeds data/seeds.example.txt --niche real_estate --max 10
+# These are verified, on-niche sites that answer HTTP 200 and expose contacts.
 # Websites that block bots (403/429) are skipped automatically.
+
+## real_estate
 https://www.theagencyre.com
 https://trulinerealty.com
 https://www.xrealty.ae
 https://larealestateagency.com
-https://www.compass.com
-https://www.kellerwilliams.com
+https://thebrokeragerec.com
+https://sellinghoustonteam.com
+https://www.rookmatthewssayer.co.uk
+https://cityrealestatesf.com
+
+## coaching
+https://nrconsulting.com
+https://www.slconsultants.in
+https://centricconsulting.com

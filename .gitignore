@@ -4,5 +4,6 @@ __pycache__/
 data/*.csv
 data/*.json
 data/*.xlsx
+data/cache/
 .venv/
 venv/

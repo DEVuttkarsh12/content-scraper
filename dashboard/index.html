@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lead Scraper — Dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span id="dot" class="dot idle"></span>
+    <div><h1>Lead Scraper</h1>
+    <div class="sub" id="sub">idle — showing last results</div></div>
+  </div>
+  <div class="top-actions">
+    <span id="pill" class="pill idle">IDLE</span>
+    <a class="btn" href="/api/export.csv" download="leads.csv" title="Download current leads as CSV">⇩ CSV</a>
+    <button id="btnStop" class="btn danger" title="Stop running scrape" disabled>■ Stop</button>
+  </div>
+</header>
+
+<!-- STATUS CARDS -->
+<section class="cards">
+  <div class="card"><label>Status</label><b id="s_status">idle</b><small id="s_pid" class="muted"></small></div>
+  <div class="card"><label>Niche</label><b id="s_niche">—</b><small id="s_search" class="muted"></small></div>
+  <div class="card"><label>Probed</label><b id="s_probed">0</b><small id="s_query" class="muted"></small></div>
+  <div class="card"><label>Leads saved</label><b id="s_leads">0</b><small id="s_src" class="muted"></small></div>
+  <div class="card"><label>Elapsed</label><b id="s_elapsed">—</b><small id="s_cmd" class="muted"></small></div>
+</section>
+
+<!-- LIVE RUN BANNER -->
+<section id="runBanner" class="panel runbanner hidden">
+  <div class="rbrow">
+    <span class="pulse"></span>
+    <div class="rbhead">
+      <b id="rbTitle">Scraping in progress…</b>
+      <small id="rbSub" class="muted"></small>
+    </div>
+    <div class="rbn"><span id="rbCount">0</span> <span class="muted">/ <span id="rbMax">0</span> leads this run</span></div>
+  </div>
+  <div class="bar"><div id="lbar" class="bar-fill"></div></div>
+  <div id="nicheChips" class="chips"></div>
+  <div id="lActivity" class="act muted">looking up candidates…</div>
+</section>
+
+<!-- RUN CONTROLS -->
+<section class="panel" id="runPanel">
+  <div class="runrow">
+    <div class="run">
+      <button class="btn primary big" type="button" id="btnRun" title="Start scraping leads">▶ Start scraping</button>
+      <div class="nicho" id="r_niches" title="click to toggle niches (multi-select)">
+        <button type="button" class="nopt on" data-niche="real_estate">real_estate</button>
+        <button type="button" class="nopt" data-niche="finance">finance</button>
+        <button type="button" class="nopt" data-niche="healthcare">healthcare</button>
+        <button type="button" class="nopt" data-niche="legal">legal</button>
+        <button type="button" class="nopt" data-niche="saas">saas</button>
+        <button type="button" class="nopt" data-niche="ecommerce">ecommerce</button>
+        <button type="button" class="nopt" data-niche="coaching">coaching</button>
+        <button type="button" class="nopt" data-niche="automotive">automotive</button>
+        <button type="button" class="nopt" data-niche="hospitality">hospitality</button>
+      </div>
+      <input id="r_max" type="number" min="1" max="500" value="6" title="max leads per niche">
+      <button type="button" id="r_optToggle" class="btn" title="advanced options">⚙ options</button>
+    </div>
+    <div class="runmeta"><span id="poll">● live · 2s</span><span id="upd"></span></div>
+  </div>
+  <div id="r_opts" class="runopts hidden" autocomplete="off">
+    <input id="r_out" type="text" value="data/leads.csv" title="--out file (kept in repo)" spellcheck="false">
+    <input id="r_seeds" type="text" placeholder="seeds file (nice when engines are rate-limited)" title="--seeds FILE — scrape these URLs directly" spellcheck="false">
+    <label class="chk" title="only keep leads with an email"><input id="r_email" type="checkbox"> emails only</label>
+    <label class="chk" title="skip MX validation + social discovery (faster)"><input id="r_noenrich" type="checkbox"> no enrich</label>
+    <input id="r_mq" type="number" min="0" max="100" value="0" title="--min-quality N (0-100): drop leads below this score" placeholder="min-q">
+    <div class="qlab">target quality</div>
+    <div class="nicho qtarget" id="r_quality" title="scrape only leads in this quality band (min-quality + max-quality)">
+      <button type="button" class="nopt on" data-q="">any</button>
+      <button type="button" class="nopt" data-q="high">high</button>
+      <button type="button" class="nopt" data-q="medium">medium</button>
+      <button type="button" class="nopt" data-q="low">low</button>
+    </div>
+  </div>
+</section>
+
+<!-- RESULTS -->
+<section class="panel" id="resultsPanel">
+  <div class="reshead">
+    <h2>Results <span id="resCount" class="muted"></span></h2>
+    <span id="resNote" class="muted"></span>
+  </div>
+  <div class="toolbar">
+    <input id="q" type="search" placeholder="Filter: name, email, domain, query…" spellcheck="false">
+    <select id="f_niche"><option value="">all niches</option></select>
+    <select id="f_q"><option value="">all quality</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select>
+    <label class="chk"><input id="f_email" type="checkbox"> has email</label>
+    <span id="count" class="muted"></span>
+  </div>
+  <div class="qlane">
+    <span class="qlab">quality</span>
+    <span id="qHigh" class="qm good">high 0</span><span id="qMed" class="qm mid">medium 0</span><span id="qLow" class="qm bad">low 0</span>
+    <span class="qlab">with email</span><span id="qEmail" class="qm email">0</span>
+  </div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Business</th><th>Contacts</th><th>Quality</th><th>Source</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="4" class="muted">no leads yet — hit <b>Start scraping</b> above</td></tr></tbody>
+  </table></div>
+</section>
+
+<!-- LIVE LOG (collapsed) -->
+<details class="panel logwrap">
+  <summary><span class="expand">▸ live log</span> <span id="lline" class="muted"></span></summary>
+  <pre id="log" class="log">no output yet — press ▶ Start scraping</pre>
+</details>
+
+<footer>read-only view · <code>python dashboard/run.py</code> · polls <code>/api/status</code> + <code>/api/leads</code> every ~2s</footer>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -1,6 +1,7 @@
 """Page fetching and parsing helpers."""
 
 import logging
+import re
 from urllib.parse import urlparse
 
 import requests
@@ -36,20 +37,32 @@ def is_page_url(url: str) -> bool:
 
 def fetch_page(session: Session, renderer: RenderClient, url: str) -> str:
     """Fetch a page as HTML, falling back to JS rendering when needed."""
+    html, _ = fetch_page_full(session, renderer, url)
+    return html
+
+
+def fetch_page_full(session: Session, renderer: RenderClient, url: str):
+    """Like fetch_page but also returns the post-redirect final URL.
+
+    Redirects are followed by the session, so `resp.url` may differ from the
+    requested URL — callers can use it to avoid crawling the same page twice
+    via different paths (e.g. /contact -> /contact-us/).
+    """
     resp = session.get(url)
+    final_url = resp.url
     content_type = resp.headers.get("Content-Type", "")
     if not any(ct in content_type for ct in ALLOWED_CONTENT_TYPES):
         # Possibly a JS-rendered site served as something else, or PDF. Skip.
         if "application/pdf" in content_type:
-            return ""
+            return "", final_url
         rendered = renderer.render(url)
         if rendered:
-            return rendered
-        return ""
+            return rendered, final_url
+        return "", final_url
     if resp.status_code == 200 and not resp.text:
         rendered = renderer.render(url)
-        return rendered or ""
-    return resp.text
+        return (rendered or ""), final_url
+    return resp.text, final_url
 
 
 def extract_text(html: str) -> str:
@@ -102,3 +115,43 @@ def anchor_links(html: str) -> list:
             seen.add(href)
             links.append(href)
     return links
+
+
+# Visible anchor text that hints at a contact / about / team page worth
+# crawling for emails. Matches English, Spanish, German, French variants.
+CONTACT_LINK_TEXT = re.compile(
+    r"\b(contact|contact us|contact-us|contacto|kontakt|impressum|imprint"
+    r"|get in touch|reach us\b|email us|write to us|talk to us|let's talk"
+    r"|connect with us|inquiries?|enquiries?|our team|our staff|our people"
+    r"|meet the team|about us|about-us|who we are)\b",
+    re.IGNORECASE,
+)
+
+
+def contact_links(html: str) -> list:
+    """Return on-site hrefs whose visible text hints at contact/about pages.
+
+    Guessing ``/contact`` misses sites that use other paths. Scanning the
+    homepage nav/footer for an actual "Contact us / About / Team" link and
+    crawling *that* URL gets emails far more often.
+    """
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "lxml")
+    out = []
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        text = a.get_text(" ", strip=True)
+        if not href or not text or href in seen:
+            continue
+        if href.startswith(("mailto:", "tel:", "#", "javascript:")):
+            continue
+        if CONTACT_LINK_TEXT.search(text):
+            seen.add(href)
+            # Only keep same-site links (relative or same host) so we never
+            # crawl off into a partner/privacy-policy domain.
+            parsed = urlparse(href)
+            if href.startswith("/") or parsed.netloc == "":
+                out.append(href)
+    return out
