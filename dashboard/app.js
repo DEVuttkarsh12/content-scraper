@@ -233,7 +233,10 @@ function row(l) {
 
   const ct = (label, cls, arr, fn) =>
     arr && arr.length ? `<div class="ct"><span class="lbl ${cls}">${label}</span><span class="chips">${arr.map(fn).join("")}</span></div>` : "";
-  const cMail = ct("email", "mail", l.emails, (e) => `<a class="chip mail" href="mailto:${esc(e)}" title="send email">${esc(e)}</a>`);
+  const cMail = ct("email", "mail", l.emails, (e) => `<a class="chip mail" href="mailto:${esc(e)}" title="send email">${esc(e)}</a>`) +
+    (l.emails && l.emails.length && l.email_origin != null && l.email_origin !== "scraped"
+      ? `<div class="ct"><span class="lbl mute">origin</span><span class="chips"><span class="chip org ${esc(l.email_origin)}" title="email_origin: address was SMTP-verified, not published on the site">${esc(l.email_origin)}</span></span></div>`
+      : "");
   const cIg = ct("instagram", "ig", l.instagram_handles, (h) => `<a class="chip ig" href="https://instagram.com/${esc(String(h).replace(/^.*\//, ""))}" target="_blank" rel="noopener">@${esc(String(h).replace(/^.*\//, ""))}</a>`);
   const cLi = ct("linkedin", "li", l.linkedin_urls, (u) => `<a class="chip li" href="${esc(u)}" target="_blank" rel="noopener">in</a>`);
   const cWa = ct("whatsapp", "wa", l.whatsapp_numbers, (p) => `<a class="chip wa" href="https://wa.me/${esc(String(p).replace(/\D/g, ""))}" target="_blank" rel="noopener">${esc(p)}</a>`);

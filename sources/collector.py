@@ -480,7 +480,9 @@ class SearchSource:
         if self.enrich and not contact.emails and domain:
             inferred = ctx.email_enricher.infer_emails(domain)
             if inferred:
-                contact = merge_contacts(contact, ContactInfo(emails=inferred))
+                contact = merge_contacts(
+                    contact, ContactInfo(emails=inferred, email_origin="inferred")
+                )
                 logger.debug("Inferred valid mailboxes for %s: %s", domain, inferred)
 
         return contact, name

@@ -263,7 +263,12 @@ def _normalize_linkedin_url(url: str) -> str | None:
 
 
 def merge_contacts(*contacts: ContactInfo) -> ContactInfo:
-    """Merge multiple ContactInfo sources into one deduped result."""
+    """Merge multiple ContactInfo sources into one deduped result.
+
+    Email origin is combined: any inferred address marks the merge (unless
+    every address is scraped) so downstream outreach knows which emails were
+    verified-by-probe rather than published on-site.
+    """
     merged = ContactInfo()
     all_emails = set()
     all_wa = set()
@@ -276,6 +281,11 @@ def merge_contacts(*contacts: ContactInfo) -> ContactInfo:
         all_ig.update(c.instagram_handles)
         all_li.update(c.linkedin_urls)
         all_phones.update(c.phones)
+    email_contacts = [c for c in contacts if c.emails]
+    if all(c.email_origin == "inferred" for c in email_contacts):
+        merged.email_origin = "inferred"
+    elif any(c.email_origin != "scraped" for c in email_contacts):
+        merged.email_origin = "mixed"
     merged.emails = sorted(all_emails)
     merged.whatsapp_numbers = sorted(all_wa)
     merged.instagram_handles = sorted(all_ig)

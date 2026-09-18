@@ -12,6 +12,9 @@ class ContactInfo:
     instagram_handles: list = field(default_factory=list)
     linkedin_urls: list = field(default_factory=list)
     phones: list = field(default_factory=list)
+    # Where emails came from: "scraped" (visible on-site) or "inferred"
+    # (generic mailbox that passed a real SMTP deliverability probe).
+    email_origin: str = "scraped"
 
     @property
     def has_anything(self) -> bool:
@@ -37,6 +40,7 @@ class Lead:
     linkedin_urls: list = field(default_factory=list)
     phones: list = field(default_factory=list)
     source_query: Optional[str] = None
+    email_origin: str = "scraped"
     scraped_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -60,6 +64,7 @@ class Lead:
             linkedin_urls=contact.linkedin_urls,
             phones=contact.phones,
             source_query=source_query,
+            email_origin=contact.email_origin,
         )
 
     @property
@@ -113,6 +118,7 @@ class Lead:
             "source_query": self.source_query or "",
             "quality_score": self.quality_score,
             "quality_label": self.quality_label,
+            "email_origin": self.email_origin,
             "scraped_at": self.scraped_at,
         }
 
@@ -130,6 +136,7 @@ class Lead:
             self.source_query or "",
             self.quality_label,
             self.quality_score,
+            self.email_origin,
             self.scraped_at,
         ]
 
@@ -146,5 +153,6 @@ CSV_HEADERS = [
     "source_query",
     "quality_label",
     "quality_score",
+    "email_origin",
     "scraped_at",
 ]

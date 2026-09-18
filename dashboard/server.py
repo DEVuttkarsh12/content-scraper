@@ -128,6 +128,7 @@ def _lead_from_any(item: dict) -> dict:
         "source_query": item.get("source_query") or "",
         "quality_label": label,
         "quality_score": score,
+        "email_origin": (item.get("email_origin") or "scraped"),
         "scraped_at": item.get("scraped_at") or "",
     }
 

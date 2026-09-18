@@ -74,6 +74,7 @@ def _lead_from_dict(item: dict) -> Lead:
         linkedin_urls=list(item.get("linkedin_urls") or []),
         phones=list(item.get("phones") or []),
         source_query=item.get("source_query") or None,
+        email_origin=item.get("email_origin") or "scraped",
         scraped_at=item.get("scraped_at") or datetime.now(timezone.utc).isoformat(),
     )
     return lead
@@ -93,6 +94,7 @@ def _lead_from_csv(row: dict) -> Lead:
         linkedin_urls=split(row.get("linkedin_urls")),
         phones=split(row.get("phones")),
         source_query=row.get("source_query") or None,
+        email_origin=row.get("email_origin") or "scraped",
         scraped_at=row.get("scraped_at") or datetime.now(timezone.utc).isoformat(),
     )
 
