@@ -166,12 +166,17 @@ def _export_json(leads: list[Lead], path: Path) -> None:
 
 
 def dedupe_leads(leads: list[Lead], key="website") -> list:
-    """Remove leads sharing the same unique key (default: website)."""
+    """Remove leads sharing the same unique key.
+
+    Website dedupe uses the hostname key (scheme/www/path-insensitive), so
+    ``https://acme.com``, ``http://www.acme.com/`` and ``https://acme.com/x``
+    collapse onto one lead — matching how merge_leads keys existing output.
+    """
     seen: set = set()
     result: list = []
     for lead in leads:
-        value = getattr(lead, key) or ""
-        value = value.lower()
+        raw = getattr(lead, key) or ""
+        value = _host_key(raw) if key == "website" else str(raw).lower()
         if value in seen:
             continue
         seen.add(value)

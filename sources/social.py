@@ -282,10 +282,11 @@ def merge_contacts(*contacts: ContactInfo) -> ContactInfo:
         all_li.update(c.linkedin_urls)
         all_phones.update(c.phones)
     email_contacts = [c for c in contacts if c.emails]
-    if all(c.email_origin == "inferred" for c in email_contacts):
-        merged.email_origin = "inferred"
-    elif any(c.email_origin != "scraped" for c in email_contacts):
-        merged.email_origin = "mixed"
+    if email_contacts:
+        if all(c.email_origin == "inferred" for c in email_contacts):
+            merged.email_origin = "inferred"
+        elif any(c.email_origin != "scraped" for c in email_contacts):
+            merged.email_origin = "mixed"
     merged.emails = sorted(all_emails)
     merged.whatsapp_numbers = sorted(all_wa)
     merged.instagram_handles = sorted(all_ig)

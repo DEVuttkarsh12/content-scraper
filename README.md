@@ -28,6 +28,19 @@ python main.py --dry-run    # validate the pipeline without scraping
 python main.py --list-niches
 ```
 
+### Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest            # 150+ offline unit tests (no keys, no network)
+```
+
+The suite covers the extractors (emails, Cloudflare decoding, phones,
+WhatsApp/Instagram/LinkedIn), filters and deny lists, the lead model and
+quality scoring, CSV/JSON round-trips and merge/dedupe, dashboard log parsing,
+and the pure helper functions of the search/collector/social modules. It
+catches regressions without ever hitting the network.
+
 ### Go live (no payment needed)
 
 ```bash

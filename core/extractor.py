@@ -12,7 +12,7 @@ from core.models import ContactInfo
 
 # Email: pragmatic pattern, excludes images and common trap TLDs.
 EMAIL_RE = re.compile(
-    r"[\w.+-]+@[\w-]+\.(?:com|net|org|io|co|ca|co\.uk|me|info|biz|us|in|"
+    r"[\w.+-]+@[\w-]+\.(?:com|net|org|io|ca|co\.uk|co|me|info|biz|us|in|"
     r"de|fr|es|it|au|nl|se|no|dk|fi|pl|cz|eu|ai|dev|agency|studio|site|"
     r"online|business|company)\b",
     re.IGNORECASE,
@@ -25,9 +25,13 @@ OBFUSCATED_EMAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# International phone numbers. Digits only after cleaning.
+# International phone numbers. Digits only after cleaning. Covers the common
+# layouts: "(555) 123-4567", "555-123-4567", "5551234567", "+44 20 7946 0958".
 PHONE_RE = re.compile(
-    r"(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?)?\d{3}[\s.-]?\d{3}[\s.-]?\d{3,4}",
+    r"(?:"
+    r"(?:\+?\d{1,3}[\s.-]?)?\(\d{2,4}\)[\s.-]?\d{3}[\s.-]?\d{4}"
+    r"|(?:\+?\d{1,3}[\s.-]?)?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}"
+    r")",
 )
 
 # Common 1-3 digit country calling codes used to sanity-check long numbers.

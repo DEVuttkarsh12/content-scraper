@@ -239,7 +239,7 @@ def parse_log(lines: list[str]) -> dict:
         m = RE_SEARCH.search(ln)
         if m:
             searches += 1
-            q = m.group(1).strip().strip("'\"")
+            q = m.group(1).strip().strip("'")
             cur_q = q
             if q not in queries:
                 queries.append(q)
@@ -342,6 +342,8 @@ def _is_under(p: Path, root: Path) -> bool:
 
 def _append_log(line: str) -> None:
     with _lock:
+        if line.startswith("### START"):
+            _log.clear()
         _log.append(line)
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
