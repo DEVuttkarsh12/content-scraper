@@ -30,8 +30,8 @@ DISPOSABLE_DOMAINS = {
     "harakirimail.com", "tmpmail.net", "tmpmail.org",
 }
 
-# Generic mailboxes tried (in order) when a site publishes no email anywhere.
-# The first mailbox that passes a real SMTP deliverability check is kept.
+# Generic mailboxes proposed when a site publishes no email anywhere.
+# These are guesses even if the domain has MX records.
 FALLBACK_MAILBOXES = (
     "info", "hello", "contact", "admin", "office",
     "sales", "enquiries", "reception", "booking", "mail",
@@ -155,7 +155,7 @@ class EmailEnricher:
 
     def enrich(self, contact: ContactInfo) -> ContactInfo:
         """Return *contact* with invalid emails removed."""
-        if not self._available or not contact.emails:
+        if not self._settings.verify_emails or not self._available or not contact.emails:
             return contact
         valid: list = []
         for email in contact.emails:
@@ -167,13 +167,10 @@ class EmailEnricher:
         return contact
 
     def infer_emails(self, domain: str, limit: int = 6) -> list:
-        """Propose generic mailboxes for a domain that published no email.
+        """Propose generic mailboxes on a mail-capable domain.
 
-        Many B2B sites only expose a contact *form* — no address anywhere on
-        the page. This is the last-resort fallback: try the most common
-        generic mailboxes (info@, hello@, contact@, …) and keep only the
-        ones that actually accept mail (real SMTP deliverability probe), so
-        every lead leaves the pipeline with a genuinely valid address.
+        This checks domain deliverability, never mailbox existence. Callers
+        must label the result as inferred and treat it as unverified.
         """
         domain = (domain or "").lower().strip()
         if not self._available or not domain:
@@ -192,8 +189,8 @@ class EmailEnricher:
         """Check syntax + disposable domain + MX record.
 
         In *strict* mode a transient DNS/network error counts as invalid so
-        we never invent a mailbox on flaky lookups (used for inferred
-        addresses). Non-strict keeps scraped emails on hiccups.
+        we do not add an inferred address on flaky lookups. Non-strict keeps
+        scraped emails on hiccups.
         """
         domain = email.rsplit("@", 1)[-1] if "@" in email else ""
         if domain.lower() in DISPOSABLE_DOMAINS:
@@ -207,7 +204,7 @@ class EmailEnricher:
             return False
         except Exception:  # noqa: BLE001
             # DNS errors, network issues — keep scraped emails rather than
-            # drop them, but never accept an unproven inferred one.
+            # drop them, but never accept an inferred one on a DNS failure.
             return not strict
 
 
@@ -265,9 +262,8 @@ def _normalize_linkedin_url(url: str) -> str | None:
 def merge_contacts(*contacts: ContactInfo) -> ContactInfo:
     """Merge multiple ContactInfo sources into one deduped result.
 
-    Email origin is combined: any inferred address marks the merge (unless
-    every address is scraped) so downstream outreach knows which emails were
-    verified-by-probe rather than published on-site.
+    Email origin is combined so downstream users can distinguish guesses
+    from addresses published on-site.
     """
     merged = ContactInfo()
     all_emails = set()

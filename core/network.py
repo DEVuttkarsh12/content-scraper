@@ -3,6 +3,8 @@
 import logging
 import random
 import time
+from urllib.parse import urljoin, urlparse
+from urllib.robotparser import RobotFileParser
 
 import requests
 
@@ -35,6 +37,8 @@ class Session:
         self._last_request_at = 0.0
         self._requests_since_proxy = 0
         self._rotate_every = max(4, len(settings.proxies)) if settings.proxies else 0
+        self._active_proxy = None
+        self._robots: dict[str, RobotFileParser | bool] = {}
 
     @property
     def _rate_limit_seconds(self) -> float:
@@ -49,11 +53,13 @@ class Session:
     def _pick_proxy(self, force: bool = False) -> dict | None:
         if not self._proxies.available:
             return None
+        if force or self._active_proxy is None or self._requests_since_proxy >= self._rotate_every:
+            self._active_proxy = self._proxies.next()
+            self._requests_since_proxy = 0
+        if self._active_proxy is None:
+            raise requests.ProxyError("No healthy configured proxy is available")
         self._requests_since_proxy += 1
-        if not force and self._requests_since_proxy < self._rotate_every:
-            return None  # keep using the current IP until rotation window
-        self._requests_since_proxy = 0
-        return self._proxies.next()
+        return self._active_proxy
 
     def _headers(self) -> dict:
         headers = {
@@ -66,9 +72,48 @@ class Session:
             headers["User-Agent"] = USER_AGENTS[0]
         return headers
 
-    def get(self, url: str, *, params: dict | None = None, headers: dict | None = None, timeout: int | None = None):
+    def _robots_allowed(self, url: str, user_agent: str) -> bool:
+        try:
+            parsed = urlparse(url)
+            valid = parsed.scheme in ("http", "https") and parsed.hostname and not parsed.username and not parsed.password
+        except ValueError:
+            valid = False
+        if not valid:
+            raise requests.InvalidURL(f"Invalid target URL: {url}")
+        if not self.settings.respect_robots:
+            return True
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in self._robots:
+            robots_url = origin + "/robots.txt"
+            try:
+                self._respect_rate_limit()
+                self._last_request_at = time.monotonic()
+                response = self._http.get(
+                    robots_url, headers={"User-Agent": user_agent},
+                    proxies=self._pick_proxy(), timeout=min(self.settings.timeout_seconds, 10),
+                )
+                if response.status_code == 404:
+                    self._robots[origin] = True
+                elif response.status_code == 200:
+                    parser = RobotFileParser()
+                    parser.parse(response.text.splitlines())
+                    self._robots[origin] = parser
+                else:
+                    self._robots[origin] = False
+            except requests.RequestException as exc:
+                logger.warning("Could not read robots.txt for %s: %s", origin, exc)
+                self._robots[origin] = False
+        policy = self._robots[origin]
+        return policy if isinstance(policy, bool) else policy.can_fetch(user_agent, url)
+
+    def get(self, url: str, *, params: dict | None = None, headers: dict | None = None,
+            timeout: int | None = None, _redirects: int = 0):
         """Perform a GET with rate limiting and retries."""
         final_headers = {**self._headers(), **(headers or {})}
+        if _redirects > 5:
+            raise requests.TooManyRedirects(f"Too many redirects: {url}")
+        if not self._robots_allowed(url, final_headers["User-Agent"]):
+            raise requests.HTTPError(f"Blocked by robots.txt: {url}")
         timeout_s = timeout or self.settings.timeout_seconds
         max_retries = self.settings.max_retries
         delay = self._rate_limit_seconds
@@ -85,14 +130,27 @@ class Session:
                     headers=final_headers,
                     proxies=proxies,
                     timeout=timeout_s,
+                    allow_redirects=False,
                 )
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location")
+                    if not location:
+                        raise requests.HTTPError(f"Redirect without Location: {url}", response=resp)
+                    return self.get(urljoin(url, location), headers=headers, timeout=timeout,
+                                    _redirects=_redirects + 1)
                 if resp.status_code == 429 and attempt < max_retries:
                     logger.warning("Rate limited on %s, backing off", url)
+                    if proxies:
+                        self._proxies.mark_failed(proxies["http"])
+                        self._active_proxy = None
                     time.sleep(min(delay * (attempt + 1), 8))
                     continue
                 # Treat proxy permission errors as retriable.
                 if resp.status_code in (403, 407) and attempt < max_retries:
                     logger.warning("Blocked (%s) on %s, rotating proxy", resp.status_code, url)
+                    if proxies:
+                        self._proxies.mark_failed(proxies["http"])
+                        self._active_proxy = None
                     time.sleep(delay)
                     continue
                 # Don't retry other 4xx client errors (404, 410, etc.).
@@ -111,7 +169,9 @@ class Session:
                 last_exc = exc
                 logger.debug("Request failed (%s): %s", url, exc)
                 if attempt < max_retries:
-                    self._proxies.mark_failed(proxies["http"]) if proxies else None
+                    if proxies:
+                        self._proxies.mark_failed(proxies["http"])
+                        self._active_proxy = None
                     time.sleep(min(delay * (attempt + 1), 8))
                     continue
         if last_exc:

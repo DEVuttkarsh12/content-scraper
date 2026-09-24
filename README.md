@@ -32,16 +32,16 @@ python main.py --list-niches
 
 ```bash
 pip install -r requirements-dev.txt
-python -m pytest            # 150+ offline unit tests (no keys, no network)
+python -m pytest            # unit tests plus a local HTTP end-to-end test
 ```
 
 The suite covers the extractors (emails, Cloudflare decoding, phones,
 WhatsApp/Instagram/LinkedIn), filters and deny lists, the lead model and
 quality scoring, CSV/JSON round-trips and merge/dedupe, dashboard log parsing,
 and the pure helper functions of the search/collector/social modules. It
-catches regressions without ever hitting the network.
+catches regressions without contacting external services.
 
-### Go live (no payment needed)
+### Run a scrape
 
 ```bash
 python main.py --niche real_estate finance --max 30 --out data/leads.csv
@@ -49,10 +49,11 @@ python main.py --niche saas --max 100 --out data/leads.json
 python main.py                      # all niches, default limits
 ```
 
-### Zero-search-discovery mode (guaranteed, works everywhere)
+### Seeded discovery mode
 
-If the free engines are bot-checking your IP, still scrape today using your
-own shortlist of business websites:
+If the free engines are bot-checking your IP, use your own shortlist of
+business websites. This avoids search-engine blocks but still depends on each
+site being reachable and allowing crawling:
 
 ```bash
 python main.py --seeds data/seeds.example.txt --niche real_estate --max 10 --out data/leads.csv
@@ -82,9 +83,36 @@ method of finding websites (Google Maps, directories, your own research).
 | `--dry-run`       | Validate config/extractors without scraping          |
 | `--list-niches`   | Print available niches and exit                      |
 
-Discovery works **out of the box with zero API keys** using a failover chain
+### Local dashboard
+
+```bash
+python dashboard/manage_users.py init  # one-time setup: Tarun, Prabh, Uttkarsh
+python dashboard/run.py --no-open
+```
+
+Open `http://127.0.0.1:8765/`. The dashboard binds to loopback only. Its run
+and lead endpoints require one of the three accounts. Password hashes live in
+`data/dashboard-users.json`, which is excluded from Git; the server refuses to
+start until the accounts are provisioned. Rotate a password with
+`python dashboard/manage_users.py set-password tarun` (or `prabh` / `uttkarsh`).
+Rotation revokes active sessions. The dashboard uses a session cookie and
+CSRF token for run controls. Keep it on loopback. Access from another machine
+requires a separate secure deployment; do not expose the HTTP server directly.
+
+The dashboard's run form accepts output files under `data/` or `output/` and seed files under
+`data/`. Keep the CLI for output paths elsewhere. Choose **Search the web** to
+discover sites by industry or **Use a seed list** to scrape known URLs. The
+activity panel shows the current run and recovers its last status after a
+dashboard restart. The library combines saved lead files, offers filters and
+details, and shows published emails by default. **Published CSV** excludes
+inferred addresses; **Export all** includes them with their `email_origin`
+label. Inferred addresses are guesses, not verified mailboxes.
+
+Discovery attempts to work with zero API keys using a failover chain
 of free engines — Bing-RSS → DuckDuckGo → Bing → Mojeek → Brave → Ecosia →
 SearXNG pool — automatically skipping any engine that bot-checks your IP.
+Free engines can all block or return poor results from some networks; use
+`--seeds` or configure SerpAPI when you need dependable discovery.
 SerpAPI and ScrapingBee are optional upgrades auto-detected when their keys
 are present.
 
@@ -98,16 +126,15 @@ are present.
 - **JS-only sites** fall back to the free `r.jina.ai` reader proxy
   (`FREE_JS_RENDER=true`, no key) so emails hidden behind JavaScript still
   surface.
-- **Search caching** (`CACHE_SEARCH=true`) banks every engine result to
-  `data/cache/` so reruns never have to re-hit the engines that bot-block —
-  each query is only searched once a week.
+- **Search caching** (`CACHE_SEARCH=true`) keeps results in `data/cache/`
+  for the configured cache window (one week by default).
 
 ## Incremental runs & lead quality
 
 Runs are incremental by default:
 
 - **Merge:** new leads are merged into the existing `--out` file instead of
-  overwriting it (duplicates collapse to the richer version).
+  overwriting it (duplicate websites combine their distinct contacts).
 - **Domain skip:** domains already in the output are skipped in search mode,
   so reruns find *new* prospects instead of re-scraping the same ones.
 - Use `--fresh` to start from scratch or `--no-merge` to overwrite.
@@ -129,10 +156,12 @@ the strongest contacts first.
 
 ## Email verification
 
-Emails are automatically validated via DNS MX-record lookups using the
+Scraped emails are checked for syntax and domain mail deliverability via the
 `email-validator` library. Disposable email domains (mailinator, yopmail,
-etc.) are filtered out. Disable with `--no-enrich` or `VERIFY_EMAILS=false`
-in `.env`.
+etc.) are filtered out. MX records do **not** verify that an individual
+mailbox exists. Disable DNS checks with `VERIFY_EMAILS=false` in `.env` or
+skip all enrichment with `--no-enrich`. Guessed generic addresses are disabled
+by default; `INFER_EMAILS=true` enables them and marks them `inferred`.
 
 ## Social discovery
 
@@ -188,6 +217,7 @@ utils/    proxy pool, host chunking helpers
 
 ## Note
 
-Respect robots.txt and each site's terms; only contact businesses that
-intended to be contacted (public contact information). Rate limits are
-baked in by design.
+Target-site requests check robots.txt by default, including redirect targets.
+Check each site's terms and use public business contact information responsibly.
+Free search engines and the optional Jina reader are external services with
+their own availability and usage limits.

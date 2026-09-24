@@ -14,6 +14,7 @@ import argparse
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 
 from config.niches import all_niche_ids, load_niches
 from config.settings import get_settings
@@ -185,7 +186,8 @@ def run_dry_run(settings) -> int:
 
 def _collect_niche(args, settings, niche, prior_domains):
     """Scrape a single niche in its own worker thread (own session)."""
-    source = SearchSource(settings, enrich=not args.no_enrich and settings.verify_emails)
+    source_settings = replace(settings, max_concurrent_requests=args.request_workers)
+    source = SearchSource(source_settings, enrich=not args.no_enrich)
     if args.seeds:
         lead_list = source.collect_seeds(niche, args.seed_urls, max_leads=args.max)
     else:
@@ -196,7 +198,14 @@ def _collect_niche(args, settings, niche, prior_domains):
 
 
 def main(argv=None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.max < 1:
+        parser.error("--max must be at least 1")
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be at least 1")
+    if not 0 <= args.min_quality <= args.max_quality <= 100:
+        parser.error("quality limits must satisfy 0 <= --min-quality <= --max-quality <= 100")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
@@ -215,34 +224,51 @@ def main(argv=None) -> int:
         print("No niches specified. Run with --list-niches to see options.", file=sys.stderr)
         return 1
 
-    if settings.has_serpapi:
+    if args.seeds:
+        print("Using provided seed URLs for discovery.")
+    elif settings.has_serpapi:
         print("Using SerpAPI for discovery (key found).")
     else:
         print("Using free Bing + DuckDuckGo + Mojeek discovery (no keys required).")
     if settings.has_scrapingbee:
         print("ScrapingBee rendering enabled (key found).")
 
-    # Load any prior output so we can merge and skip already-scraped domains.
-    prior_leads = [] if (args.fresh or args.no_merge) else load_leads(args.out)
+    out_path = args.out
+    if args.json_out and not out_path.endswith(".json"):
+        out_path = out_path.rsplit(".", 1)[0] + ".json" if "." in out_path.rsplit("/", 1)[-1] else out_path + ".json"
+
+    # Load the actual output path selected by --json for merge and domain skip.
+    try:
+        prior_leads = [] if (args.fresh or args.no_merge) else load_leads(out_path, strict=True)
+    except ValueError as exc:
+        logger.error("Could not read prior output: %s", exc)
+        return 1
     prior_domains = {
         (lead.website or "").lower().removeprefix("http://").removeprefix("https://")
         .removeprefix("www.").split("/")[0]
         for lead in prior_leads if lead.website
     }
     if prior_leads:
-        print(f"Loaded {len(prior_leads)} prior leads from {args.out} "
+        print(f"Loaded {len(prior_leads)} prior leads from {out_path} "
               f"({len(prior_domains)} unique domains)."
               + ("" if args.seeds else "  Skipping those domains in search mode."))
 
     if args.seeds:
-        args.seed_urls = load_seed_urls(args.seeds)
+        try:
+            args.seed_urls = load_seed_urls(args.seeds)
+        except OSError as exc:
+            logger.error("Could not read seed file %s: %s", args.seeds, exc)
+            return 1
         if not args.seed_urls:
             print(f"No URLs found in {args.seeds}", file=sys.stderr)
             return 1
         print(f"Loaded {len(args.seed_urls)} seed URLs from {args.seeds}")
 
-    workers = max(1, args.workers or settings.max_concurrent_requests)
+    request_limit = max(1, settings.max_concurrent_requests)
+    workers = min(max(1, args.workers or request_limit), request_limit, len(niches))
+    args.request_workers = max(1, request_limit // workers)
     all_leads = []
+    failures = []
     if len(niches) > 1 and workers > 1:
         print(f"\nScraping {len(niches)} niches with {workers} parallel workers...")
         with ThreadPoolExecutor(max_workers=min(workers, len(niches))) as pool:
@@ -256,12 +282,22 @@ def main(argv=None) -> int:
                     all_leads.extend(future.result())
                 except Exception as exc:  # noqa: BLE001
                     logger.error("Niche %s failed: %s", nid, exc)
+                    failures.append(nid)
     else:
         for niche in niches:
             print(f"\n== Scraping niche: {niche.label} ==")
-            leads = _collect_niche(args, settings, niche, prior_domains)
+            try:
+                leads = _collect_niche(args, settings, niche, prior_domains)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("Niche %s failed: %s", niche.id, exc)
+                failures.append(niche.id)
+                continue
             all_leads.extend(leads)
             print(f"  collected {len(leads)} qualified leads for {niche.id}")
+
+    if failures:
+        logger.error("Run failed for %s; existing output was left untouched", ", ".join(failures))
+        return 1
 
     all_leads = dedupe_leads(all_leads)
 
@@ -278,10 +314,11 @@ def main(argv=None) -> int:
         all_leads = [l for l in all_leads if l.quality_score <= args.max_quality]
         print(f"  --max-quality {args.max_quality}: kept {len(all_leads)} of {before} leads.")
 
-    out_path = args.out
-    if args.json_out and not out_path.endswith(".json"):
-        out_path = out_path.rsplit(".", 1)[0] + ".json" if "." in out_path.rsplit("/", 1)[-1] else out_path + ".json"
-    export_leads(all_leads, out_path, merge=not args.no_merge)
+    try:
+        export_leads(all_leads, out_path, merge=not (args.no_merge or args.fresh))
+    except (OSError, ValueError) as exc:
+        logger.error("Could not export leads: %s", exc)
+        return 1
     print(f"\nDone. Wrote {len(all_leads)} new leads to {out_path}")
     if not args.no_merge and (args.fresh is False) and prior_leads:
         print(f"  {len(prior_leads)} prior leads were preserved/merged.")

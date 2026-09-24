@@ -1,16 +1,24 @@
 """Tests for dashboard/server.py read-side helpers (no server, no network)."""
 
 import json
+import csv
+import io
+import threading
+from http.cookiejar import CookieJar
+from http.server import ThreadingHTTPServer
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 import pytest
 
 import dashboard.server as server
+from dashboard.auth import AuthStore, provision
 
 
 class TestQuality:
     def test_email_weight(self):
         assert server.quality_score(["a@x.com"], [], [], [], []) == 17
         assert server.quality_score(["a@x.com"] * 5, [], [], [], []) == 65
+        assert server.quality_score(["a@x.com"] * 5, [], [], [], [], "inferred") == 2
 
     def test_label_bands(self):
         assert server.quality_label(60) == "high"
@@ -53,8 +61,8 @@ class TestLeadFromAny:
         }
         lead = server._lead_from_any(item)
         assert lead["emails"] == ["a@acme.com", "b@acme.com"]
-        assert lead["quality_score"] == 74
-        assert lead["quality_label"] == "high"
+        assert lead["quality_score"] == 2
+        assert lead["quality_label"] == "low"
         assert lead["email_origin"] == "inferred"
 
     def test_missing_score_recomputed(self):
@@ -87,6 +95,18 @@ class TestHostKey:
 
     def test_empty(self):
         assert server._host_key("") == ""
+
+
+class TestDashboardPaths:
+    def test_output_confined_to_data_files(self):
+        assert server._output_path("data/leads.csv") == "data/leads.csv"
+        assert server._output_path("../outside.csv") is None
+        assert server._output_path("config/niches.py") is None
+        assert server._output_path("data/../main.py") is None
+
+    def test_remote_binding_rejected(self):
+        with pytest.raises(ValueError, match="loopback"):
+            server.serve(host="0.0.0.0", port=0)
 
 
 class TestParseLog:
@@ -141,6 +161,28 @@ class TestLoadLeads:
         assert len(leads) == 1
         assert leads[0]["emails"] == ["info@acme.com", "sales@acme.com"]
 
+    def test_merges_equal_contacts_from_newer_file(self, tmp_path, monkeypatch):
+        older = tmp_path / "older.json"
+        newer = tmp_path / "newer.json"
+        older.write_text(json.dumps({"leads": [{
+            "business_name": "Old name", "website": "https://acme.com",
+            "niche": "coaching", "emails": ["info@acme.com"],
+        }]}), encoding="utf-8")
+        newer.write_text(json.dumps({"leads": [{
+            "business_name": "New name", "website": "https://acme.com",
+            "niche": "real_estate", "emails": ["info@acme.com"],
+        }]}), encoding="utf-8")
+        older.touch()
+        newer.touch()
+        # Candidate order does not determine precedence; file mtime does.
+        import os
+        os.utime(older, (1, 1))
+        os.utime(newer, (2, 2))
+        monkeypatch.setattr(server, "candidate_files", lambda: [older, newer])
+        leads, _ = server.load_leads()
+        assert leads[0]["business_name"] == "New name"
+        assert leads[0]["niche"] == "real_estate"
+
     def test_empty_when_no_files(self, tmp_path, monkeypatch):
         monkeypatch.setattr(server, "candidate_files", lambda: [])
         leads, src = server.load_leads()
@@ -153,3 +195,50 @@ class TestLoadLeads:
         monkeypatch.setattr(server, "candidate_files", lambda: [bad])
         leads, _ = server.load_leads()
         assert leads == []
+
+
+def test_persisted_log_recovers_only_last_run(tmp_path, monkeypatch):
+    path = tmp_path / "run.log"
+    path.write_text(
+        "### START 2026-01-01T10:00:00+00:00 :: python main.py --niche saas --max 5 --out data/leads.csv\n"
+        "Probing https://one.test\ncollected 3 qualified leads for saas\n"
+        "### EXIT code=0 at 2026-01-01T10:01:00+00:00\n"
+        "### START 2026-01-01T11:00:00+00:00 :: python main.py --niche real_estate --max 2 --out data/new.csv --seeds data/seeds.demo.txt\n"
+        "Probing https://two.test\ncollected 0 qualified leads for real_estate\n"
+        "### EXIT code=0 at 2026-01-01T11:01:00+00:00\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "LOG_PATH", path)
+    before_run, before_log = dict(server._run), list(server._log)
+    try:
+        server.load_persisted_log()
+        assert server.parse_log(list(server._log))["candidates_probed"] == 1
+        assert server.parse_log(list(server._log))["leads_collected"] == 0
+        assert server._run["niches"] == ["real_estate"]
+        assert server._run["out_file"] == "data/new.csv"
+        assert server._run["exit_code"] == 0
+    finally:
+        server._run.clear(); server._run.update(before_run)
+        server._log.clear(); server._log.extend(before_log)
+
+
+def test_dashboard_published_export_excludes_inferred(monkeypatch, tmp_path):
+    published = server._lead_from_any({"business_name": "Published", "website": "https://one.test", "emails": ["info@one.test"]})
+    guessed = server._lead_from_any({"business_name": "Guessed", "website": "https://two.test", "emails": ["info@two.test"], "email_origin": "inferred"})
+    monkeypatch.setattr(server, "load_leads", lambda: ([published, guessed], None))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    store = tmp_path / "users.json"
+    provision({"tarun": "test-pass", "prabh": "test-pass", "uttkarsh": "test-pass"}, store)
+    httpd.auth = AuthStore(store)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{httpd.server_port}"
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        opener.open(Request(url + "/api/login", data=json.dumps({"username": "tarun", "password": "test-pass"}).encode(), headers={"Content-Type": "application/json"}), timeout=3).close()
+        with opener.open(url + "/api/export.csv?published_only=1", timeout=3) as response:
+            rows = list(csv.DictReader(io.StringIO(response.read().decode("utf-8-sig"))))
+        assert len(rows) == 1
+        assert rows[0]["business_name"] == "Published"
+        assert rows[0]["email_origin"] == "scraped"
+    finally:
+        httpd.shutdown(); httpd.server_close(); thread.join(timeout=3)

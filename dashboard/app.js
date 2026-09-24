@@ -1,267 +1,288 @@
 const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
+const asList = (value) => Array.isArray(value) ? value : [];
+const isPublished = (lead) => asList(lead.emails).length > 0 && lead.email_origin === "scraped";
+const isInferred = (lead) => asList(lead.emails).length > 0 && lead.email_origin !== "scraped";
+const safeUrl = (value) => { try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) ? url.href : ""; } catch { return ""; } };
+const safeEmail = (value) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value)) ? String(value) : "";
+const timeText = (seconds) => { const n = Math.max(0, Math.floor(Number(seconds) || 0)); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; };
+const titleCase = (value) => value === "saas" ? "SaaS" : String(value || "").replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase());
+const dateText = (value) => { const date = new Date(value || ""); return Number.isNaN(date.getTime()) ? "Date unknown" : date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }); };
 
-const esc = (s) =>
-  String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const state = { mode: "search", leads: [], status: null, visibleLimit: 20, loading: false, refreshing: false, lastLeads: "", lastLog: "" };
+let toastTimer;
+let csrfToken = "";
 
-const fmt = (s) => (s ? Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0") : "0:00");
-const short = (cmd, n = 90) => (cmd && cmd.length > n ? cmd.slice(0, n - 3) + "…" : cmd || "");
-const qcls = (q) => ({ high: "q-high", medium: "q-medium", low: "q-low" }[q] || "q-low");
-const qlabel = (l) => (l.quality_label || "low").toLowerCase();
-
-let isRunning = false;
-let baseline = null;
-let summary = null;
-let summaryShown = false;
-const knownNames = new Set();
-
-$("btnRun").addEventListener("click", submitRun);
-$("r_optToggle").addEventListener("click", () => $("r_opts").classList.toggle("hidden"));
-const nicheBox = $("r_niches");
-nicheBox.addEventListener("click", (ev) => {
-  const b = ev.target.closest(".nopt");
-  if (!b) return;
-  if (b.classList.contains("on") && nicheBox.querySelectorAll(".nopt.on").length <= 1) return;
-  b.classList.toggle("on");
-});
-// Target quality: single-select chips -> quality band for this run.
-// high 60-100, medium 30-59, low 0-29, any = honor the manual min-q field.
-const QUAL_BANDS = { high: [60, 100], medium: [30, 59], low: [0, 29], "": [0, 100] };
-const qBox = $("r_quality");
-qBox.addEventListener("click", (ev) => {
-  const b = ev.target.closest(".nopt");
-  if (!b) return;
-  qBox.querySelectorAll(".nopt").forEach((x) => x.classList.toggle("on", x === b));
-});
-$("btnStop").addEventListener("click", async () => {
-  try {
-    const r = await fetch("/api/stop", { method: "POST" });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok && !d.ok) alert("stop failed: " + (d.error || r.status));
-  } catch (e) {
-    alert("stop failed: " + e.message);
+function notice(message, success = false) {
+  const node = $("formNotice");
+  node.textContent = message;
+  node.classList.toggle("success", success);
+  node.classList.remove("hidden");
+}
+function clearNotice() { $("formNotice").classList.add("hidden"); }
+function toast(message) {
+  const node = $("toast"); node.textContent = message; node.classList.add("show");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => node.classList.remove("show"), 2600);
+}
+function setMode(mode) {
+  state.mode = mode;
+  for (const [id, value] of [["modeSearch", "search"], ["modeSeeds", "seeds"]]) {
+    const selected = mode === value;
+    $(id).classList.toggle("selected", selected);
+    $(id).setAttribute("aria-pressed", String(selected));
   }
+  $("seedField").classList.toggle("hidden", mode !== "seeds");
+  $("sourceHelp").textContent = mode === "seeds"
+    ? "Your list skips search engines and goes straight to the listed websites."
+    : "Free search providers may limit requests. Seed lists are useful when discovery is blocked.";
+  clearNotice();
+}
+$("modeSearch").addEventListener("click", () => setMode("search"));
+$("modeSeeds").addEventListener("click", () => setMode("seeds"));
+
+const nicheBox = $("r_niches");
+function selectedNiches() { return [...nicheBox.querySelectorAll(".niche-choice.selected")].map((button) => button.dataset.niche); }
+function updateNicheCount() { const n = selectedNiches().length; $("nicheCount").textContent = `${n} selected`; }
+nicheBox.addEventListener("click", (event) => {
+  const button = event.target.closest(".niche-choice");
+  if (!button || !nicheBox.contains(button)) return;
+  if (button.classList.contains("selected") && selectedNiches().length === 1) { notice("Choose at least one industry."); return; }
+  button.classList.toggle("selected");
+  button.setAttribute("aria-pressed", String(button.classList.contains("selected")));
+  updateNicheCount(); clearNotice();
 });
-["q", "f_niche", "f_q", "f_email"].forEach((id) => {
-  $(id).addEventListener(id === "q" ? "input" : "change", () => renderLeads(state.leads || { total: 0, leads: [] }));
-});
-const state = { leads: { total: 0, leads: [] } };
+for (const id of ["r_max", "r_out", "r_seeds"]) $(id).addEventListener("input", clearNotice);
 
 async function submitRun() {
-  const niches = [...nicheBox.querySelectorAll(".nopt.on")].map((b) => b.dataset.niche);
-  if (!niches.length) {
-    alert("pick at least one niche");
-    return;
-  }
-  const sel = qBox.querySelector(".nopt.on");
-  const band = QUAL_BANDS[(sel && sel.dataset.q) || ""] || QUAL_BANDS[""];
-  const manual = parseInt($("r_mq").value, 10) || 0;
-  const body = {
-    niche: niches.join(","),
-    max: parseInt($("r_max").value, 10) || 6,
-    out: $("r_out").value.trim() || "data/leads.csv",
-    seeds: $("r_seeds").value.trim() || "",
-    min_quality: (sel && sel.dataset.q) ? band[0] : manual,
-    max_quality: (sel && sel.dataset.q) ? band[1] : 100,
+  if (state.loading || state.status?.running) return;
+  const niches = selectedNiches();
+  const max = Number($("r_max").value);
+  const out = $("r_out").value.trim();
+  const seeds = $("r_seeds").value.trim();
+  if (!niches.length) return notice("Choose at least one industry.");
+  if (!Number.isInteger(max) || max < 1 || max > 500) return notice("Enter a lead target between 1 and 500.");
+  if (!/^(data|output)\/(?!.*\.\.)[^\\]+\.(csv|json)$/i.test(out)) return notice("Save results to a CSV or JSON file under data/ or output/.");
+  if (state.mode === "seeds" && !/^data\/(?!.*\.\.)[^\\]+$/.test(seeds)) return notice("Enter an existing seed file under data/.");
+  const payload = {
+    niche: niches, max, out, seeds: state.mode === "seeds" ? seeds : "",
+    min_quality: Number($("r_quality").value) || 0,
     emails_only: $("r_email").checked,
     no_enrich: $("r_noenrich").checked,
+    fresh: $("r_fresh").checked,
   };
-  const but = $("btnRun");
-  but.disabled = true;
-  but.textContent = "starting…";
+  state.loading = true;
+  $("btnRun").disabled = true;
+  $("btnRun").innerHTML = "Starting…";
+  clearNotice();
   try {
-    const r = await fetch("/api/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      alert("run rejected: " + (d.error || r.status));
-    } else {
-      $("log").textContent = "scrape started — progress shows above, results land below…\n";
-      knownNames.clear();
-      summary = null;
-      summaryShown = false;
-      tick();
-    }
-  } catch (e) {
-    alert("failed to start: " + e.message);
+    const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify(payload) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    notice("Scrape started. Live activity and results will update below.", true);
+    $("activity").scrollIntoView({ behavior: "smooth", block: "center" });
+    await refresh();
+  } catch (error) {
+    notice(`Could not start the scrape: ${error.message}`);
+  } finally {
+    state.loading = false;
+    $("btnRun").innerHTML = "Start scraping <span aria-hidden=\"true\">→</span>";
+    $("btnRun").disabled = !!state.status?.running;
   }
-  but.textContent = "▶ Start scraping";
 }
+$("btnRun").addEventListener("click", submitRun);
+$("btnStop").addEventListener("click", async () => {
+  $("btnStop").disabled = true;
+  try {
+    const response = await fetch("/api/stop", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: "{}" });
+    const result = await response.json();
+    if (!response.ok || result.ok === false) throw new Error(result.error || `HTTP ${response.status}`);
+    toast("Stop requested");
+    await refresh();
+  } catch (error) { notice(`Could not stop the run: ${error.message}`); }
+});
 
-function renderStatus(s) {
-  const running = !!s.running;
-  const wasRunning = isRunning;
-  isRunning = running;
-  if (running && !wasRunning) {
-    baseline = state.leads.total || 0;
-    summary = null;
-    summaryShown = false;
-  }
-  if (!running && wasRunning && baseline !== null) {
-    const delta = (state.leads.total || 0) - baseline;
-    summary = { secs: s.elapsed_s, delta };
-    baseline = null;
-  }
-  if (summary && !summaryShown) {
-    const d = summary.delta;
-    let tail;
-    if (d > 0) tail = "+" + d + " new leads saved";
-    else if (d < 0) tail = Math.abs(d) + " leads removed by filters";
-    else
-      tail = "found 0 new leads — free engines get rate-limited; retry in a few min, tick a seed file in options, or set a SERPAPI key in .env for guaranteed discovery";
-    $("resNote").textContent = "last run finished in " + fmt(summary.secs || 0) + "s · " + tail;
-    summaryShown = true;
-    setTimeout(() => $("resultsPanel").scrollIntoView({ behavior: "smooth", block: "start" }), 150);
-  }
-  $("dot").className = "dot " + (running ? "run" : "idle");
-  $("pill").className = "pill " + (running ? "run" : "idle");
-  $("pill").textContent = running ? "SCRAPING" : s.exit_code === null ? "IDLE" : "EXIT " + s.exit_code;
-  $("sub").textContent = running
-    ? "fetching & probing candidates — new leads appear below live"
-    : s.exit_code === null
-      ? "idle — showing last results"
-      : "last run finished in " + fmt(s.elapsed_s) + (s.exit_code === 0 ? "" : " · exit code " + s.exit_code);
-
-  $("s_status").textContent = running ? "SCRAPING…" : s.exit_code === null ? "idle" : "done";
-  $("s_pid").textContent = s.pid ? "pid " + s.pid : s.exit_code === null ? "" : "exited " + s.exit_code;
-  $("s_niche").textContent = s.niches && s.niches.length ? s.niches.join(", ") : s.niche || "—";
-  $("s_search").textContent = (s.searches || 0) + " searches";
-  $("s_probed").textContent = s.candidates_probed || 0;
-  $("s_query").textContent = s.current_query || "—";
-  $("s_leads").textContent = s.leads_found || 0;
-  $("s_src").textContent = s.source_file || s.out_file || "—";
-  $("s_elapsed").textContent = running ? fmt(s.elapsed_s) + " · running" : s.elapsed_s ? fmt(s.elapsed_s) : "—";
-  $("s_cmd").textContent = short(running ? (s.current_url ? "probe " + s.current_url : s.cmd) : s.cmd);
-
-  $("btnRun").disabled = running;
+function renderStatus(status) {
+  state.status = status;
+  const running = !!status.running;
+  const failed = !running && status.exit_code !== null && status.exit_code !== 0;
+  const finished = !running && status.exit_code === 0;
+  $("connection").className = `connection ${running ? "running" : failed ? "error" : ""}`;
+  $("headerStatus").textContent = running ? "Scraping now" : failed ? "Run needs attention" : "Local & ready";
+  $("runBadge").className = `run-state ${running ? "running" : failed ? "error" : "idle"}`;
+  $("runBadge").lastElementChild.textContent = running ? "Running" : failed ? "Failed" : finished ? "Complete" : "Idle";
+  $("activity").classList.toggle("running", running);
+  const mode = status.seeds ? "seed list" : "web search";
+  $("runTitle").textContent = running ? "Your scrape is underway" : failed ? "The last run did not finish" : finished ? "Last run complete" : "Ready when you are";
+  const errorLine = (status.log_tail || []).slice().reverse().find((line) => /\| ERROR\s+\|/.test(line));
+  const found = Number(status.leads_collected_log) || 0;
+  $("runSummary").textContent = running
+    ? `Working through ${status.niches?.length || 1} industry selection${status.niches?.length === 1 ? "" : "s"} using ${mode}.`
+    : failed ? (errorLine ? errorLine.split(" | ").slice(-1)[0] : `Exit code ${status.exit_code}. Open the run log for details.`)
+    : finished ? (found ? `Collected ${found} lead${found === 1 ? "" : "s"} and saved results to ${status.out_file || "the selected file"}.` : "The run finished without new leads. Your saved library is still available below.")
+    : "Set up a scrape to see discovery, progress, and saved leads here.";
+  const max = Math.max(1, (Number(status.max) || 0) * Math.max(1, status.niches?.length || 1));
+  const pct = running || finished ? Math.min(100, Math.round(found / max * 100)) : 0;
+  $("runProgress").style.width = `${pct}%`;
+  $("runProgressTrack").setAttribute("aria-valuenow", String(pct));
+  $("progressLabel").textContent = running ? "Leads collected so far" : finished ? "Leads collected in last run" : failed ? "Run stopped with an error" : "No run in progress";
+  $("progressAmount").textContent = running || finished ? `${found} / ${max}` : "—";
+  $("metricProbed").textContent = status.candidates_probed || 0;
+  $("metricSearches").textContent = status.searches || 0;
+  $("metricFound").textContent = found;
+  $("runCurrent").textContent = running ? status.current_url || status.current_query || "Preparing candidates…" : failed ? "Open the run log to see what happened." : finished ? "Ready for another run." : "Waiting for a run";
+  $("runTime").textContent = `${running ? "Elapsed" : "Last duration"} ${status.elapsed_s ? timeText(status.elapsed_s) : "—"}`;
+  $("btnRun").disabled = running || state.loading;
   $("btnStop").disabled = !running;
-  $("poll").className = running ? "live" : "";
-  $("poll").textContent = running ? "● live scraping · refresh 2s" : "● live · refresh 2s";
-
-  $("runBanner").classList.toggle("hidden", !running);
-  if (running) {
-    const n = s.niches && s.niches.length ? s.niches.length : 1;
-    const mx = (s.max || 6) * n;
-    const got = s.leads_found || 0;
-    $("rbCount").textContent = got;
-    $("rbMax").textContent = mx;
-    $("lbar").style.width = mx > 0 ? Math.min(100, Math.round((got / mx) * 100)) + "%" : "0%";
-    $("rbSub").textContent =
-      "probed " + (s.candidates_probed || 0) + " candidates · " + (s.searches || 0) + " searches · writing to " + (s.out_file || "…");
-    const pn = s.per_niche || {};
-    $("nicheChips").innerHTML =
-      Object.entries(pn)
-        .map(([k, v]) => `<span class="nchip">${esc(k)} <b>${v}/<small>${s.max || 6}</small></b></span>`)
-        .join("") || `<span class="nchip muted">warming engines…</span>`;
-    $("lActivity").innerHTML =
-      "<span class='actb'>now probing</span> " +
-      esc(s.current_url || "…") +
-      (s.current_query ? ` <span class="muted">· query: ${esc(s.current_query)}</span>` : "");
+  const lines = status.log_tail || [];
+  const logText = lines.length ? lines.join("\n") : "No run output yet.";
+  if (state.lastLog !== logText) {
+    const log = $("log"); const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    log.textContent = logText; if (atBottom) log.scrollTop = log.scrollHeight;
+    state.lastLog = logText;
   }
-
-  const el = $("log");
-  const lines = s.log_tail || [];
-  const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
-  el.textContent = lines.length ? lines.join("\n") : "no output yet — press ▶ Start scraping";
-  if (nearBottom) el.scrollTop = el.scrollHeight;
-  $("upd").textContent = "updated " + new Date().toLocaleTimeString();
-  $("lline").textContent = lines.length ? (lines[lines.length - 1] || "").slice(0, 100) : "";
+  $("logLine").textContent = lines.length ? lines[lines.length - 1].slice(0, 95) : "Latest output appears here";
 }
 
-function renderLeads(d) {
-  state.leads = d || { total: 0, leads: [] };
-  const leads = d.leads || [];
-  $("resCount").textContent = leads.length ? "(" + leads.length + ")" : "";
-  const q = $("q").value.trim().toLowerCase();
-  const nf = $("f_niche").value;
-  const qf = $("f_q").value;
-  const ef = $("f_email").checked;
-  const spec = (l) =>
-    [l.business_name, l.website, l.emails || [], l.linkedin_urls || [], l.whatsapp_numbers || [], l.instagram_handles || [], l.phones || [], l.source_query || ""]
-      .flat()
-      .map(String)
-      .join(" ")
-      .toLowerCase();
+function updateNicheFilter(leads) {
+  const select = $("f_niche");
+  const previous = select.value;
+  const values = [...new Set(leads.map((lead) => lead.niche).filter(Boolean))].sort();
+  select.replaceChildren(new Option("All industries", ""), ...values.map((value) => new Option(titleCase(value), value)));
+  if (values.includes(previous)) select.value = previous;
+}
+function leadCard(lead, index) {
+  const site = safeUrl(lead.website);
+  const host = site ? new URL(site).hostname.replace(/^www\./, "") : "Website unavailable";
+  const email = safeEmail(asList(lead.emails)[0]);
+  const trust = isPublished(lead) ? "published" : isInferred(lead) ? "inferred" : "none";
+  const primary = trust === "published" && email
+    ? `<small>Published email</small><a href="mailto:${esc(email)}">${esc(email)}</a>`
+    : trust === "inferred" ? `<small>Unverified email guess</small><strong>${esc(email || "See details")}</strong>`
+    : `<small>Contact options</small><strong>${asList(lead.whatsapp_numbers).length ? "WhatsApp available" : asList(lead.phones).length ? "Phone available" : "No email found"}</strong>`;
+  const channels = [["Email", asList(lead.emails).length], ["WhatsApp", asList(lead.whatsapp_numbers).length], ["Instagram", asList(lead.instagram_handles).length], ["LinkedIn", asList(lead.linkedin_urls).length], ["Phone", asList(lead.phones).length]]
+    .filter((entry) => entry[1]).map(([label, count]) => `<span class="channel">${esc(label)} ${count}</span>`).join("");
+  const name = String(lead.business_name || host);
+  const quality = ["high", "medium", "low"].includes(lead.quality_label) ? lead.quality_label : "low";
+  return `<article class="lead-card"><div class="lead-top"><div class="lead-avatar" aria-hidden="true">${esc(name.trim()[0]?.toUpperCase() || "?")}</div><div class="lead-title"><h3 title="${esc(name)}">${esc(name)}</h3>${site ? `<a href="${esc(site)}" target="_blank" rel="noopener noreferrer">${esc(host)} ↗</a>` : `<span>${esc(host)}</span>`}</div><span class="quality-tag ${quality}">${quality}</span></div><div class="lead-primary ${trust}">${primary}</div><div class="lead-meta"><span class="tag">${esc(titleCase(lead.niche))}</span><span class="lead-channels">${channels}</span></div><div class="lead-bottom"><span>${esc(dateText(lead.scraped_at))} · score ${Number(lead.quality_score) || 0}</span><button type="button" class="details-button" data-lead-index="${index}">View details →</button></div></article>`;
+}
 
-  if (!$("f_niche").dataset.filled) {
-    const set = [...new Set(leads.map((l) => l.niche).filter(Boolean))];
-    set.forEach((v) => {
-      const o = document.createElement("option");
-      o.value = v;
-      o.textContent = v;
-      $("f_niche").appendChild(o);
-    });
-    $("f_niche").dataset.filled = "1";
-  }
-
-  const visible = leads.filter((l) => {
-    if (qf && (l.quality_label || "low").toLowerCase() !== qf) return false;
-    if (nf && l.niche !== nf) return false;
-    if (ef && !(l.emails && l.emails.length)) return false;
-    if (q && !spec(l).includes(q)) return false;
+function renderLibrary() {
+  const leads = state.leads;
+  const published = leads.filter(isPublished).length;
+  const inferred = leads.filter(isInferred).length;
+  const other = leads.length - published - inferred;
+  $("heroTotal").textContent = leads.length;
+  $("heroPublished").textContent = published;
+  $("heroInferred").textContent = inferred;
+  $("resultTotal").textContent = leads.length;
+  $("publishedCount").textContent = published;
+  $("inferredCount").textContent = inferred;
+  $("otherCount").textContent = other;
+  const query = $("q").value.trim().toLowerCase();
+  const niche = $("f_niche").value;
+  const origin = $("f_origin").value;
+  const quality = $("f_q").value;
+  const filtered = leads.map((lead, index) => ({ lead, index })).filter(({ lead }) => {
+    if (niche && lead.niche !== niche) return false;
+    if (origin === "published" && !isPublished(lead)) return false;
+    if (origin === "inferred" && !isInferred(lead)) return false;
+    if (origin === "none" && asList(lead.emails).length) return false;
+    if (quality && lead.quality_label !== quality) return false;
+    if (query && ![lead.business_name, lead.website, lead.niche, lead.source_query, ...asList(lead.emails), ...asList(lead.phones)].join(" ").toLowerCase().includes(query)) return false;
     return true;
   });
-
-  const hi = leads.filter((l) => qlabel(l) === "high").length;
-  const med = leads.filter((l) => qlabel(l) === "medium").length;
-  const lo = leads.filter((l) => qlabel(l) === "low").length;
-  const wEmail = leads.filter((l) => l.emails && l.emails.length).length;
-  $("qHigh").textContent = "high " + hi;
-  $("qMed").textContent = "medium " + med;
-  $("qLow").textContent = "low " + lo;
-  $("qEmail").textContent = wEmail;
-  $("count").textContent = "showing " + visible.length + " of " + leads.length;
-
-  $("rows").innerHTML = visible.length
-    ? visible.map((l) => row(l)).join("")
-    : `<tr><td colspan="4" class="muted">${leads.length ? "no leads match the filters" : "no leads yet — hit Start scraping above"}</td></tr>`;
+  const sort = $("f_sort").value;
+  filtered.sort((a, b) => sort === "name" ? String(a.lead.business_name).localeCompare(String(b.lead.business_name))
+    : sort === "recent" ? String(b.lead.scraped_at).localeCompare(String(a.lead.scraped_at))
+    : (Number(b.lead.quality_score) || 0) - (Number(a.lead.quality_score) || 0));
+  const visible = filtered.slice(0, state.visibleLimit);
+  $("leadGrid").innerHTML = visible.map(({ lead, index }) => leadCard(lead, index)).join("");
+  $("resultCount").textContent = `Showing ${visible.length} of ${filtered.length} matching leads`;
+  $("emptyState").classList.toggle("hidden", filtered.length > 0);
+  $("showMore").classList.toggle("hidden", filtered.length <= state.visibleLimit);
+  $("emptyText").textContent = !leads.length ? "Start a scrape to build your lead library."
+    : origin === "published" && !published ? "No published emails saved yet. View all leads to inspect other contact channels and unverified guesses."
+    : "Try another search or filter to see more leads.";
+  $("clearFilters").textContent = !leads.length ? "Set up a scrape" : "Show all leads";
+  $("dataSource").textContent = state.status?.source_file ? `Latest file: ${state.status.source_file}` : "";
 }
+for (const id of ["q", "f_niche", "f_origin", "f_q", "f_sort"]) $(id).addEventListener(id === "q" ? "input" : "change", () => { state.visibleLimit = 20; renderLibrary(); });
+$("showMore").addEventListener("click", () => { state.visibleLimit += 20; renderLibrary(); });
+$("clearFilters").addEventListener("click", () => {
+  if (!state.leads.length) return $("workspace").scrollIntoView({ behavior: "smooth" });
+  $("q").value = ""; $("f_niche").value = ""; $("f_origin").value = "all"; $("f_q").value = "";
+  state.visibleLimit = 20; renderLibrary();
+});
 
-function row(l) {
-  const nameK = l.business_name || l.website || "?";
-  const fresh = isRunning && !knownNames.has(nameK);
-  if (isRunning) knownNames.add(nameK);
-
-  const ntag = `<span class="ntag">${esc(l.niche || "")}</span>`;
-  const site = l.website
-    ? `<a class="site" href="${esc(l.website)}" target="_blank" rel="noopener">${esc(l.website.replace(/^https?:\/\/(www\.)?/, "").replace(/\/+$/, ""))}</a>`
-    : "";
-  const name = `<div class="biz">${esc(l.business_name || "(untitled)")}${ntag}</div>${site}`;
-
-  const ct = (label, cls, arr, fn) =>
-    arr && arr.length ? `<div class="ct"><span class="lbl ${cls}">${label}</span><span class="chips">${arr.map(fn).join("")}</span></div>` : "";
-  const cMail = ct("email", "mail", l.emails, (e) => `<a class="chip mail" href="mailto:${esc(e)}" title="send email">${esc(e)}</a>`) +
-    (l.emails && l.emails.length && l.email_origin != null && l.email_origin !== "scraped"
-      ? `<div class="ct"><span class="lbl mute">origin</span><span class="chips"><span class="chip org ${esc(l.email_origin)}" title="email_origin: address was SMTP-verified, not published on the site">${esc(l.email_origin)}</span></span></div>`
-      : "");
-  const cIg = ct("instagram", "ig", l.instagram_handles, (h) => `<a class="chip ig" href="https://instagram.com/${esc(String(h).replace(/^.*\//, ""))}" target="_blank" rel="noopener">@${esc(String(h).replace(/^.*\//, ""))}</a>`);
-  const cLi = ct("linkedin", "li", l.linkedin_urls, (u) => `<a class="chip li" href="${esc(u)}" target="_blank" rel="noopener">in</a>`);
-  const cWa = ct("whatsapp", "wa", l.whatsapp_numbers, (p) => `<a class="chip wa" href="https://wa.me/${esc(String(p).replace(/\D/g, ""))}" target="_blank" rel="noopener">${esc(p)}</a>`);
-  const cPh = ct("phone", "ph", l.phones, (p) => `<span class="chip ph">${esc(p)}</span>`);
-  const contacts = cMail + cIg + cLi + cWa + cPh;
-  const noCont = !contacts ? `<div class="ct"><span class="lbl mute">contacts</span><span class="muted">none found</span></div>` : "";
-
-  const q = qlabel(l);
-  const qual = `<span class="q ${qcls(q)}">${q}</span><span class="score">${l.quality_score == null ? "" : l.quality_score}</span>`;
-  const src = `<div class="src">${esc(l.source_query || "")}<br>${esc(String(l.scraped_at || "").slice(0, 16))}</div>`;
-  return `<tr class="${fresh ? "newrow" : ""}"><td>${name}</td><td class="contacts">${contacts || noCont}</td><td>${qual}</td><td>${src}</td></tr>`;
+function detailSection(title, values, format) {
+  if (!values.length) return "";
+  return `<section class="detail-section"><h3>${esc(title)}</h3><div class="detail-items">${values.map(format).join("")}</div></section>`;
 }
+function showDetails(index) {
+  const lead = state.leads[index]; if (!lead) return;
+  $("dialogTitle").textContent = lead.business_name || "Business details";
+  const site = safeUrl(lead.website);
+  const trust = isPublished(lead) ? "published" : isInferred(lead) ? "inferred" : "none";
+  const emailItems = asList(lead.emails).map((value) => {
+    const email = safeEmail(value);
+    return trust === "published" && email
+      ? `<span class="detail-item"><a class="detail-site" href="mailto:${esc(email)}">${esc(email)}</a><button class="detail-copy" data-copy="${esc(email)}" type="button">Copy</button></span>`
+      : `<span class="detail-item">${esc(value)}</span>`;
+  });
+  const social = asList(lead.instagram_handles).map((handle) => {
+    const clean = String(handle).replace(/^@/, "").replace(/[^\w.]/g, "");
+    return clean ? `<a class="detail-item" href="https://instagram.com/${encodeURIComponent(clean)}" target="_blank" rel="noopener noreferrer">Instagram · @${esc(clean)} ↗</a>` : "";
+  }).concat(asList(lead.linkedin_urls).map((value) => {
+    const url = safeUrl(value); return url ? `<a class="detail-item" href="${esc(url)}" target="_blank" rel="noopener noreferrer">LinkedIn · ${esc(new URL(url).pathname.replace(/^\//, ""))} ↗</a>` : "";
+  })).filter(Boolean);
+  const wa = asList(lead.whatsapp_numbers).map((value) => {
+    const digits = String(value).replace(/\D/g, ""); return digits ? `<a class="detail-item" href="https://wa.me/${digits}" target="_blank" rel="noopener noreferrer">WhatsApp · ${esc(value)} ↗</a>` : "";
+  }).filter(Boolean);
+  const phones = asList(lead.phones).map((value) => `<span class="detail-item">${esc(value)}</span>`);
+  $("dialogBody").innerHTML = `${site ? `<a class="detail-site" href="${esc(site)}" target="_blank" rel="noopener noreferrer">${esc(site)} ↗</a>` : ""}<div class="detail-flags"><span class="detail-flag">${esc(titleCase(lead.niche))}</span><span class="detail-flag ${trust}">${trust === "published" ? "Published email" : trust === "inferred" ? "Inferred email" : "No email"}</span><span class="detail-flag">Quality ${Number(lead.quality_score) || 0} · ${esc(lead.quality_label || "low")}</span></div>${trust === "inferred" ? `<p class="detail-warning">These addresses were inferred from a mail-capable domain. Their individual mailboxes have not been verified, so review them before any outreach.</p>` : ""}${detailSection("Email addresses", emailItems, (item) => item)}${detailSection("Social profiles", social, (item) => item)}${detailSection("WhatsApp", wa, (item) => item)}${detailSection("Phone numbers", phones, (item) => item)}<section class="detail-section"><h3>Discovery</h3><div class="detail-muted">${lead.source_query === "seed" ? "Seed list" : esc(lead.source_query || "Search result")} · collected ${esc(dateText(lead.scraped_at))}</div></section>`;
+  $("leadDialog").showModal();
+}
+$("leadGrid").addEventListener("click", (event) => { const button = event.target.closest("[data-lead-index]"); if (button) showDetails(Number(button.dataset.leadIndex)); });
+$("dialogClose").addEventListener("click", () => $("leadDialog").close());
+$("leadDialog").addEventListener("click", (event) => { if (event.target === $("leadDialog")) $("leadDialog").close(); });
+$("dialogBody").addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-copy]"); if (!button) return;
+  try { await navigator.clipboard.writeText(button.dataset.copy); toast("Email copied"); }
+  catch { toast("Could not copy. Select the address instead."); }
+});
 
-async function tick() {
+async function refresh() {
+  if (state.refreshing) return;
+  state.refreshing = true;
   try {
-    const [st, ld] = await Promise.all([
-      fetch("/api/status").then((r) => r.json()),
-      fetch("/api/leads").then((r) => r.json()),
-    ]);
-    renderStatus(st);
-    renderLeads(ld);
-  } catch (e) {
-    $("poll").className = "";
-    $("poll").textContent = "● dashboard offline";
-  }
+    const [statusResponse, leadsResponse] = await Promise.all([fetch("/api/status"), fetch("/api/leads")]);
+    if (statusResponse.status === 401 || leadsResponse.status === 401) { window.location.replace("/login"); return; }
+    if (!statusResponse.ok || !leadsResponse.ok) throw new Error("Dashboard unavailable");
+    const [status, data] = await Promise.all([statusResponse.json(), leadsResponse.json()]);
+    renderStatus(status);
+    const leads = asList(data.leads);
+    const digest = JSON.stringify(leads);
+    if (digest !== state.lastLeads) { state.leads = leads; state.lastLeads = digest; updateNicheFilter(leads); renderLibrary(); }
+    $("lastUpdated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  } catch {
+    $("connection").className = "connection error";
+    $("headerStatus").textContent = "Dashboard offline";
+    $("lastUpdated").textContent = "Connection lost · retrying";
+  } finally { state.refreshing = false; }
 }
-setInterval(tick, 2000);
-tick();
+document.getElementById("signOut").addEventListener("click", async () => {
+  try { await fetch("/api/logout", { method: "POST", headers: { "X-CSRF-Token": csrfToken } }); }
+  finally { window.location.replace("/login"); }
+});
+async function startDashboard() {
+  try {
+    const response = await fetch("/api/session");
+    if (!response.ok) { window.location.replace("/login"); return; }
+    const session = await response.json();
+    csrfToken = session.csrf;
+    document.getElementById("userName").textContent = session.username;
+    refresh();
+    setInterval(refresh, 2000);
+  } catch { window.location.replace("/login"); }
+}
+startDashboard();

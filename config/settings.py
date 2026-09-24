@@ -52,6 +52,10 @@ class ScraperSettings:
     max_retries: int = _env_int("MAX_RETRIES", 2)
     search_country: str = os.getenv("SEARCH_COUNTRY", "us").strip().lower()
     verify_emails: bool = _env_bool("VERIFY_EMAILS", True)
+    respect_robots: bool = _env_bool("RESPECT_ROBOTS", True)
+    # MX records cannot prove that a specific mailbox exists. Guessing is
+    # therefore opt-in and always marked as inferred in exported leads.
+    infer_emails: bool = _env_bool("INFER_EMAILS", False)
     # Free-lite options (all default-on so it works with zero keys).
     free_js_render: bool = _env_bool("FREE_JS_RENDER", True)
     cache_search: bool = _env_bool("CACHE_SEARCH", True)

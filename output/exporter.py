@@ -11,6 +11,9 @@ existing output file (default) so every run builds on the last one.
 import csv
 import json
 import logging
+import os
+import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -46,7 +49,7 @@ def _host_key(url: str) -> str:
         return (url or "").lower()
 
 
-def load_leads(path: str) -> list:
+def load_leads(path: str, *, strict: bool = False) -> list:
     """Load previously exported leads from CSV or JSON, or [] when missing."""
     out_path = Path(path)
     if not out_path.exists():
@@ -54,11 +57,25 @@ def load_leads(path: str) -> list:
     try:
         if out_path.suffix.lower() == ".json":
             data = json.loads(out_path.read_text(encoding="utf-8"))
-            return [_lead_from_dict(item) for item in data.get("leads", [])]
+            if not isinstance(data, dict) or not isinstance(data.get("leads"), list):
+                raise ValueError("JSON output must contain a leads list")
+            if any(not isinstance(item, dict) for item in data["leads"]):
+                raise ValueError("JSON leads must be objects")
+            leads = [_lead_from_dict(item) for item in data["leads"]]
+            if strict and any(not lead.website for lead in leads):
+                raise ValueError("JSON lead is missing a website")
+            return leads
         with out_path.open(newline="", encoding="utf-8-sig") as fh:
             reader = csv.DictReader(fh)
-            return [_lead_from_csv(row) for row in reader]
-    except (json.JSONDecodeError, OSError, ValueError) as exc:
+            if not reader.fieldnames or not {"business_name", "website"}.issubset(reader.fieldnames):
+                raise ValueError("CSV output is missing required headers")
+            leads = [_lead_from_csv(row) for row in reader]
+            if strict and any(not lead.website for lead in leads):
+                raise ValueError("CSV lead is missing a website")
+            return leads
+    except (json.JSONDecodeError, OSError, ValueError, csv.Error, TypeError) as exc:
+        if strict:
+            raise ValueError(f"Cannot merge unreadable output {path}: {exc}") from exc
         logger.warning("Could not read existing output %s: %s", path, exc)
         return []
 
@@ -100,16 +117,23 @@ def _lead_from_csv(row: dict) -> Lead:
 
 
 def merge_leads(new_leads: list, existing: list) -> list:
-    """Merge new leads into existing, keeping unique websites and the richer
-    version of any duplicate (more contact points wins)."""
+    """Merge duplicate websites without losing distinct contact points."""
     merged: dict[str, Lead] = {}
     for lead in list(existing) + list(new_leads):
         key = _host_key(lead.website or "")
         if not key:
             continue
         prev = merged.get(key)
-        if prev is None or len(_contact_count(lead)) >= len(_contact_count(prev)):
+        if prev is None:
             merged[key] = lead
+        else:
+            richer, other = (lead, prev) if len(_contact_count(lead)) >= len(_contact_count(prev)) else (prev, lead)
+            combined = replace(richer)
+            for field_name in ("emails", "whatsapp_numbers", "instagram_handles", "linkedin_urls", "phones"):
+                setattr(combined, field_name, sorted(set(getattr(richer, field_name)) | set(getattr(other, field_name))))
+            origins = {l.email_origin for l in (prev, lead) if l.emails}
+            combined.email_origin = origins.pop() if len(origins) == 1 else ("mixed" if origins else "scraped")
+            merged[key] = combined
     return sorted(merged.values(), key=lambda l: l.quality_score, reverse=True)
 
 
@@ -130,7 +154,7 @@ def export_leads(leads: list, path: str, *, merge: bool = True) -> Path:
 
     to_write = list(leads)
     if merge and out_path.exists():
-        existing = purge_invalid(load_leads(path))
+        existing = purge_invalid(load_leads(path, strict=True))
         if existing:
             to_write = merge_leads(leads, existing)
             logger.info("Merged %d new leads with %d existing -> %d total",
@@ -139,10 +163,20 @@ def export_leads(leads: list, path: str, *, merge: bool = True) -> Path:
     to_write = purge_invalid(to_write)
     to_write = sorted(to_write, key=lambda l: l.quality_score, reverse=True)
 
-    if out_path.suffix.lower() == ".json":
-        _export_json(to_write, out_path)
-    else:
-        _export_csv(to_write, out_path)
+    # Replace only after a complete write; interruption keeps the prior file.
+    fd, temp_name = tempfile.mkstemp(prefix=f".{out_path.name}.", suffix=out_path.suffix, dir=out_path.parent)
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        if out_path.suffix.lower() == ".json":
+            _export_json(to_write, temp_path)
+        else:
+            _export_csv(to_write, temp_path)
+        os.replace(temp_path, out_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    logger.info("Exported %d leads to %s: %s", len(to_write),
+                "JSON" if out_path.suffix.lower() == ".json" else "CSV", out_path)
     return out_path
 
 
@@ -152,7 +186,6 @@ def _export_csv(leads: list[Lead], path: Path) -> None:
         writer.writerow(CSV_HEADERS)
         for lead in leads:
             writer.writerow(lead.flat_row())
-    logger.info("Exported %d leads to CSV: %s", len(leads), path)
 
 
 def _export_json(leads: list[Lead], path: Path) -> None:
@@ -162,7 +195,6 @@ def _export_json(leads: list[Lead], path: Path) -> None:
         "leads": [lead.to_dict() for lead in leads],
     }
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    logger.info("Exported %d leads to JSON: %s", len(leads), path)
 
 
 def dedupe_leads(leads: list[Lead], key="website") -> list:
@@ -172,6 +204,8 @@ def dedupe_leads(leads: list[Lead], key="website") -> list:
     ``https://acme.com``, ``http://www.acme.com/`` and ``https://acme.com/x``
     collapse onto one lead — matching how merge_leads keys existing output.
     """
+    if key == "website":
+        return merge_leads(leads, [])
     seen: set = set()
     result: list = []
     for lead in leads:

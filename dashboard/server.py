@@ -14,15 +14,21 @@ Run via:  python dashboard/run.py
 from __future__ import annotations
 
 import csv
+import hmac
+import ipaddress
 import json
 import re
+import shlex
 import subprocess
 import threading
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
+
+from dashboard.auth import AuthStore, SESSION_SECONDS
 
 ROOT = Path(__file__).resolve().parent.parent
 DASH = Path(__file__).resolve().parent
@@ -63,14 +69,19 @@ def iso(dt: datetime | None) -> str | None:
 
 # ---------------------------------------------------------------- quality (mirrors core/models.py, standalone copy)
 
-def quality_score(emails, wa, ig, li, phones) -> int:
+def quality_score(emails, wa, ig, li, phones, email_origin="scraped") -> int:
     s = 0
-    s += min(len(emails), 5) * 12
+    if email_origin == "inferred":
+        s += 2 if emails else 0
+    elif email_origin == "mixed":
+        s += 12 if emails else 0
+    else:
+        s += min(len(emails), 5) * 12
     s += min(len(wa), 3) * 8
     s += min(len(ig), 3) * 5
     s += min(len(li), 3) * 4
     s += min(len(phones), 3) * 2
-    if emails:
+    if emails and email_origin != "inferred":
         s += 5
     if wa:
         s += 5
@@ -108,14 +119,11 @@ def _lead_from_any(item: dict) -> dict:
     ig = _norm_list(item.get("instagram_handles"))
     li = _norm_list(item.get("linkedin_urls"))
     ph = _norm_list(item.get("phones"))
-    try:
-        score = int(item.get("quality_score", "") or 0)
-    except (TypeError, ValueError):
-        score = 0
-    label = (item.get("quality_label") or "").strip().lower()
-    if not label or label not in ("high", "medium", "low") or not item.get("quality_score"):
-        score = quality_score(emails, wa, ig, li, ph)
-        label = quality_label(score)
+    origin = (item.get("email_origin") or "scraped").strip().lower()
+    # Recalculate legacy scores: older exports counted MX-backed guesses as
+    # verified mailboxes, so their stored quality labels are misleading.
+    score = quality_score(emails, wa, ig, li, ph, origin)
+    label = quality_label(score)
     return {
         "business_name": item.get("business_name") or "Unknown",
         "niche": item.get("niche") or "",
@@ -128,7 +136,7 @@ def _lead_from_any(item: dict) -> dict:
         "source_query": item.get("source_query") or "",
         "quality_label": label,
         "quality_score": score,
-        "email_origin": (item.get("email_origin") or "scraped"),
+        "email_origin": origin,
         "scraped_at": item.get("scraped_at") or "",
     }
 
@@ -188,6 +196,13 @@ def _contacts_n(l: dict) -> int:
     return len(l["emails"]) + len(l["whatsapp_numbers"]) + len(l["instagram_handles"]) + len(l["linkedin_urls"]) + len(l["phones"])
 
 
+def _lead_rank(lead: dict) -> tuple[int, int]:
+    # Prefer a published email to a long list of speculative mailboxes.
+    origin = lead["email_origin"]
+    trust = 2 if lead["emails"] and origin == "scraped" else 1 if origin == "mixed" else 0
+    return trust, _contacts_n(lead)
+
+
 def load_leads() -> tuple[list[dict], Path | None]:
     """Return (leads, newest_source). Merges all candidates in memory
     (display only, never writes) so idle state shows *all* last results
@@ -211,7 +226,8 @@ def load_leads() -> tuple[list[dict], Path | None]:
                 if not key:
                     continue
                 prev = merged.get(key)
-                if prev is None or _contacts_n(l) >= _contacts_n(prev):
+                # Files are processed newest first. Keep that record on ties.
+                if prev is None or _lead_rank(l) > _lead_rank(prev):
                     merged[key] = l
         except (OSError, ValueError, json.JSONDecodeError):
             continue
@@ -308,6 +324,7 @@ def build_status() -> dict:
         "niches": snap["niches"] or niches,
         "max": snap["max"],
         "out_file": snap["out_file"],
+        "seeds": snap["seeds"],
         "cmd": snap["cmd_str"],
         "started_at": iso(started),
         "ended_at": iso(ended),
@@ -336,6 +353,26 @@ def _is_under(p: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _local_host(host: str) -> bool:
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _output_path(raw: str) -> str | None:
+    """Dashboard runs may write only CSV/JSON files in data or output."""
+    path = Path(raw)
+    if path.is_absolute() or path.suffix.lower() not in {".csv", ".json"}:
+        return None
+    resolved = (ROOT / path).resolve()
+    if not any(_is_under(resolved, (ROOT / directory).resolve()) for directory in ("data", "output")):
+        return None
+    return str(path)
 
 
 # ---------------------------------------------------------------- run spawning (display plumbing only)
@@ -416,23 +453,19 @@ def start_run(opts: dict) -> tuple[bool, dict]:
         max_leads = max(1, min(int(opts.get("max", 6)), 500))
     except (TypeError, ValueError):
         max_leads = 6
-    out = str(opts.get("out") or "data/leads.csv").strip() or "data/leads.csv"
-    # confine --out to repo tree (never absolute-escape / scraper dirs are untouched anyway)
-    if Path(out).is_absolute():
-        out = "data/leads.csv"
+    out = _output_path(str(opts.get("out") or "data/leads.csv").strip())
+    if out is None:
+        return False, {"error": "output must be a .csv or .json file under data/ or output/"}
     seeds = str(opts.get("seeds") or "").strip()
-    if seeds and (".." in seeds or seeds.startswith("/")):
-        seeds = ""
+    if seeds:
+        seed_path = (ROOT / seeds).resolve()
+        if not _is_under(seed_path, (ROOT / "data").resolve()) or not seed_path.is_file():
+            return False, {"error": "seeds must be an existing file under data/"}
     try:
         workers = int(opts.get("workers") or 2)
         workers = max(1, min(workers, 8))
     except (TypeError, ValueError):
         workers = 2
-
-    with _lock:
-        p = _run["proc"]
-        if p is not None and p.poll() is None:
-            return False, {"error": "a scrape is already running", "pid": p.pid}
 
     py = _resolve_python()  # venv-aware: works from any interpreter
     cmd = [py, "-u", "main.py", "--niche", *niche, "--max", str(max_leads),
@@ -455,6 +488,10 @@ def start_run(opts: dict) -> tuple[bool, dict]:
         pass
     if opts.get("no_enrich"):
         cmd += ["--no-enrich"]
+    if opts.get("fresh"):
+        cmd += ["--fresh"]
+    elif opts.get("no_merge"):
+        cmd += ["--no-merge"]
 
     # friendly display string (quote only paths with spaces)
     def q(a: str) -> str:
@@ -462,15 +499,17 @@ def start_run(opts: dict) -> tuple[bool, dict]:
 
     cmd_str = " ".join(q(a) for a in cmd)
 
-    try:
-        proc = subprocess.Popen(
-            cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1,
-        )
-    except OSError as exc:
-        return False, {"error": f"failed to launch scraper: {exc}"}
-
     with _lock:
+        p = _run["proc"]
+        if p is not None and p.poll() is None:
+            return False, {"error": "a scrape is already running", "pid": p.pid}
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(ROOT), stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1,
+            )
+        except OSError as exc:
+            return False, {"error": f"failed to launch scraper: {exc}"}
         _run.update(proc=proc, cmd=cmd, cmd_str=cmd_str, niches=niche,
                     max=max_leads, out_file=out, seeds=seeds,
                     started_at=utcnow(), ended_at=None, exit_code=None,
@@ -497,17 +536,47 @@ def stop_run() -> dict:
 def load_persisted_log() -> None:
     try:
         if LOG_PATH.is_file():
-            tail = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()[-500:]
+            lines = LOG_PATH.read_text(encoding="utf-8", errors="replace").splitlines()
+            last_start = next((i for i in range(len(lines) - 1, -1, -1)
+                               if lines[i].startswith("### START ")), None)
+            tail = lines[last_start:][-500:] if last_start is not None else []
             with _lock:
                 _log.clear()
                 _log.extend(tail)
-                # recover last START cmd for idle display
-                for ln in reversed(tail):
-                    if ln.startswith("### START"):
-                        parts = ln.split("::", 1)
-                        if len(parts) == 2:
-                            _run["cmd_str"] = parts[1].strip()
-                        break
+                if last_start is None:
+                    return
+                parts = lines[last_start].split("::", 1)
+                if len(parts) != 2:
+                    return
+                _run["cmd_str"] = parts[1].strip()
+                try:
+                    _run["started_at"] = datetime.fromisoformat(parts[0].removeprefix("### START ").strip())
+                    cmd = shlex.split(_run["cmd_str"])
+                    _run["cmd"] = cmd
+                    for flag, field in (("--max", "max"), ("--out", "out_file"), ("--seeds", "seeds")):
+                        if flag in cmd:
+                            value = cmd[cmd.index(flag) + 1]
+                            _run[field] = int(value) if flag == "--max" else value
+                    if "--niche" in cmd:
+                        start = cmd.index("--niche") + 1
+                        _run["niches"] = []
+                        for arg in cmd[start:]:
+                            if arg.startswith("--"):
+                                break
+                            _run["niches"].append(arg)
+                except (ValueError, IndexError):
+                    pass
+                exit_line = next((ln for ln in reversed(tail) if ln.startswith("### EXIT code=")), None)
+                if exit_line:
+                    match = re.match(r"### EXIT code=(-?\d+) at (\S+)", exit_line)
+                    if match:
+                        _run["exit_code"] = int(match.group(1))
+                        try:
+                            _run["ended_at"] = datetime.fromisoformat(match.group(2))
+                        except ValueError:
+                            pass
+                else:
+                    _run["exit_code"] = 1  # prior process was interrupted
     except OSError:
         pass
 
@@ -525,20 +594,38 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):  # quiet; dashboard has its own log view
         pass
 
+    def _same_origin(self) -> bool:
+        host = self.headers.get("Host", "")
+        try:
+            host_name = urlparse("//" + host).hostname
+        except ValueError:
+            return False
+        if not _local_host(host_name or ""):
+            return False
+        origin = self.headers.get("Origin")
+        if origin:
+            parsed = urlparse(origin)
+            return parsed.scheme in {"http", "https"} and parsed.netloc == host
+        return True
+
     # -- helpers
     def _send(self, code: int, body: bytes, ctype: str, extra: dict | None = None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj).encode(), "application/json")
+    def _json(self, obj, code=200, extra: dict | None = None):
+        self._send(code, json.dumps(obj).encode(), "application/json", extra)
 
     def _static(self, name: str):
         target = (DASH / name).resolve()
@@ -547,13 +634,69 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, target.read_bytes(), MIME.get(target.suffix, "application/octet-stream"))
 
+    def _cookie_token(self) -> str:
+        try:
+            cookies = SimpleCookie()
+            cookies.load(self.headers.get("Cookie", ""))
+            return cookies["lead_session"].value if "lead_session" in cookies else ""
+        except Exception:
+            return ""
+
+    def _session(self) -> dict | None:
+        return self.server.auth.session(self._cookie_token())
+
+    def _require_session(self, api: bool) -> dict | None:
+        session = self._session()
+        if session:
+            return session
+        if api:
+            self._json({"error": "login required"}, 401)
+        else:
+            self._send(303, b"", "text/plain", {"Location": "/login"})
+        return None
+
+    def _read_json(self) -> dict | None:
+        if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+            self._json({"error": "JSON content type required"}, 415)
+            return None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json({"error": "invalid content length"}, 400)
+            return None
+        if length < 1 or length > 4096:
+            self._json({"error": "invalid request body length"}, 413)
+            return None
+        try:
+            opts = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._json({"error": "invalid JSON body"}, 400)
+            return None
+        if not isinstance(opts, dict):
+            self._json({"error": "JSON object required"}, 400)
+            return None
+        return opts
+
     # -- routes
     def do_GET(self):
+        if not self._same_origin():
+            return self._json({"error": "local origin required"}, 403)
         path = urlparse(self.path).path
+        if path == "/login":
+            if self._session():
+                return self._send(303, b"", "text/plain", {"Location": "/"})
+            return self._static("login.html")
+        if path in ("/login.css", "/login.js"):
+            return self._static(path.lstrip("/"))
+        if not self._require_session(path.startswith("/api/") or path == "/export.csv"):
+            return
         if path in ("/", "/index.html"):
             return self._static("index.html")
         if path in ("/style.css", "/app.js"):
             return self._static(path.lstrip("/"))
+        if path == "/api/session":
+            session = self._session()
+            return self._json({"username": session["username"], "csrf": session["csrf"]})
         if path == "/api/status":
             return self._json(build_status())
         if path == "/api/leads":
@@ -568,33 +711,58 @@ class Handler(BaseHTTPRequestHandler):
             })
         if path in ("/api/export.csv", "/export.csv"):
             leads, _ = load_leads()
+            only_published = parse_qs(urlparse(self.path).query).get("published_only") == ["1"]
+            if only_published:
+                leads = [lead for lead in leads if lead["emails"] and lead["email_origin"] == "scraped"]
             import io
             buf = io.StringIO()
             w = csv.writer(buf)
             w.writerow(["business_name", "niche", "website", "emails", "whatsapp_numbers",
                         "instagram_handles", "linkedin_urls", "phones", "source_query",
-                        "quality_label", "quality_score", "scraped_at"])
+                        "quality_label", "quality_score", "email_origin", "scraped_at"])
             for l in leads:
                 w.writerow([l["business_name"], l["niche"], l["website"],
                             " | ".join(l["emails"]), " | ".join(l["whatsapp_numbers"]),
                             " | ".join(l["instagram_handles"]), " | ".join(l["linkedin_urls"]),
                             " | ".join(l["phones"]), l["source_query"],
-                            l["quality_label"], l["quality_score"], l["scraped_at"]])
+                            l["quality_label"], l["quality_score"], l["email_origin"], l["scraped_at"]])
             raw = ("\ufeff" + buf.getvalue()).encode("utf-8")
             return self._send(200, raw, "text/csv; charset=utf-8",
                               {"Content-Disposition": 'attachment; filename="leads.csv"'})
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._same_origin():
+            return self._json({"error": "local origin required"}, 403)
         path = urlparse(self.path).path
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
-        try:
-            opts = json.loads(raw.decode() or "{}") if raw else {}
-            if not isinstance(opts, dict):
-                opts = {}
-        except (ValueError, UnicodeDecodeError):
-            opts = {}
+        if path not in ("/api/login", "/api/logout", "/api/run", "/api/stop"):
+            return self._json({"error": "not found"}, 404)
+        if path == "/api/login":
+            opts = self._read_json()
+            if opts is None:
+                return
+            username, password = opts.get("username"), opts.get("password")
+            if not isinstance(username, str) or not isinstance(password, str):
+                return self._json({"error": "invalid credentials"}, 401)
+            try:
+                result = self.server.auth.login(username, password, self.client_address[0])
+            except PermissionError:
+                return self._json({"error": "too many attempts; try again in 10 minutes"}, 429)
+            if not result:
+                return self._json({"error": "invalid credentials"}, 401)
+            token, _ = result
+            return self._json({"username": username.strip().lower()}, 200, {"Set-Cookie": f"lead_session={token}; Path=/; HttpOnly; SameSite=Strict"})
+        session = self._require_session(True)
+        if not session:
+            return
+        if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"]):
+            return self._json({"error": "invalid request token"}, 403)
+        if path == "/api/logout":
+            self.server.auth.revoke(self._cookie_token())
+            return self._json({"ok": True}, 200, {"Set-Cookie": "lead_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"})
+        opts = self._read_json()
+        if opts is None:
+            return
         if path == "/api/run":
             ok, info = start_run(opts)
             return self._json(info, 200 if ok else 409)
@@ -604,9 +772,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host="127.0.0.1", port=8765, leads: str | None = None):
+    if not _local_host(host):
+        raise ValueError("dashboard must bind to localhost or a loopback address")
     if leads:
         _leads_override["path"] = leads
     load_persisted_log()
+    auth = AuthStore()
     srv = ThreadingHTTPServer((host, port), Handler)
+    srv.auth = auth
     srv.daemon_threads = True
     return srv

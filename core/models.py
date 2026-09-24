@@ -13,7 +13,7 @@ class ContactInfo:
     linkedin_urls: list = field(default_factory=list)
     phones: list = field(default_factory=list)
     # Where emails came from: "scraped" (visible on-site) or "inferred"
-    # (generic mailbox that passed a real SMTP deliverability probe).
+    # (guessed generic mailbox on a domain with a valid MX record).
     email_origin: str = "scraped"
 
     @property
@@ -86,12 +86,17 @@ class Lead:
         best prospects first. Score ranges roughly 0-100.
         """
         score = 0
-        score += min(len(self.emails), 5) * 12        # verified outreach channel
+        if self.email_origin == "inferred":
+            score += 2 if self.emails else 0  # mailbox existence is unknown
+        elif self.email_origin == "mixed":
+            score += 12 if self.emails else 0  # at least one published address
+        else:
+            score += min(len(self.emails), 5) * 12
         score += min(len(self.whatsapp_numbers), 3) * 8  # direct WhatsApp
         score += min(len(self.instagram_handles), 3) * 5
         score += min(len(self.linkedin_urls), 3) * 4
         score += min(len(self.phones), 3) * 2
-        if self.emails:
+        if self.emails and self.email_origin != "inferred":
             score += 5   # bonus for having an email at all
         if self.whatsapp_numbers:
             score += 5

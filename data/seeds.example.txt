@@ -1,6 +1,6 @@
 # One business website per line (comments with # and blank lines are ignored).
 # Used with: python main.py --seeds data/seeds.example.txt --niche real_estate --max 10
-# These are verified, on-niche sites that answer HTTP 200 and expose contacts.
+# Example sites; availability and contact details may change over time.
 # Websites that block bots (403/429) are skipped automatically.
 
 ## real_estate

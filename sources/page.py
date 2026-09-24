@@ -25,8 +25,14 @@ IGNORE_HANDLES = {
 
 def is_page_url(url: str) -> bool:
     """Ask us to skip obvious non-web resources and file downloads."""
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+    except ValueError:
+        return False
     if parsed.scheme != "http" and parsed.scheme != "https":
+        return False
+    if not host or parsed.username or parsed.password:
         return False
     path = parsed.path.lower()
     for ext in (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".zip", ".csv", ".doc", ".docx", ".mp4"):
@@ -149,9 +155,9 @@ def contact_links(html: str) -> list:
             continue
         if CONTACT_LINK_TEXT.search(text):
             seen.add(href)
-            # Only keep same-site links (relative or same host) so we never
-            # crawl off into a partner/privacy-policy domain.
+            # Absolute links are checked against the homepage host when
+            # _ordered_contact_urls resolves this list.
             parsed = urlparse(href)
-            if href.startswith("/") or parsed.netloc == "":
+            if not parsed.netloc or parsed.scheme in ("http", "https"):
                 out.append(href)
     return out
