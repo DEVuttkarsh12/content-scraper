@@ -11,6 +11,7 @@ const dateText = (value) => { const date = new Date(value || ""); return Number.
 
 const state = { mode: "search", leads: [], status: null, visibleLimit: 20, loading: false, refreshing: false, lastLeads: "", lastLog: "" };
 let toastTimer;
+let csrfToken = "";
 
 function notice(message, success = false) {
   const node = $("formNotice");
@@ -74,7 +75,7 @@ async function submitRun() {
   $("btnRun").innerHTML = "Starting…";
   clearNotice();
   try {
-    const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const response = await fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: JSON.stringify(payload) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
     notice("Scrape started. Live activity and results will update below.", true);
@@ -92,7 +93,7 @@ $("btnRun").addEventListener("click", submitRun);
 $("btnStop").addEventListener("click", async () => {
   $("btnStop").disabled = true;
   try {
-    const response = await fetch("/api/stop", { method: "POST", headers: { "Content-Type": "application/json" } });
+    const response = await fetch("/api/stop", { method: "POST", headers: { "Content-Type": "application/json", "X-CSRF-Token": csrfToken }, body: "{}" });
     const result = await response.json();
     if (!response.ok || result.ok === false) throw new Error(result.error || `HTTP ${response.status}`);
     toast("Stop requested");
@@ -255,6 +256,7 @@ async function refresh() {
   state.refreshing = true;
   try {
     const [statusResponse, leadsResponse] = await Promise.all([fetch("/api/status"), fetch("/api/leads")]);
+    if (statusResponse.status === 401 || leadsResponse.status === 401) { window.location.replace("/login"); return; }
     if (!statusResponse.ok || !leadsResponse.ok) throw new Error("Dashboard unavailable");
     const [status, data] = await Promise.all([statusResponse.json(), leadsResponse.json()]);
     renderStatus(status);
@@ -268,5 +270,19 @@ async function refresh() {
     $("lastUpdated").textContent = "Connection lost · retrying";
   } finally { state.refreshing = false; }
 }
-setInterval(refresh, 2000);
-refresh();
+document.getElementById("signOut").addEventListener("click", async () => {
+  try { await fetch("/api/logout", { method: "POST", headers: { "X-CSRF-Token": csrfToken } }); }
+  finally { window.location.replace("/login"); }
+});
+async function startDashboard() {
+  try {
+    const response = await fetch("/api/session");
+    if (!response.ok) { window.location.replace("/login"); return; }
+    const session = await response.json();
+    csrfToken = session.csrf;
+    document.getElementById("userName").textContent = session.username;
+    refresh();
+    setInterval(refresh, 2000);
+  } catch { window.location.replace("/login"); }
+}
+startDashboard();

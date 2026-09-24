@@ -86,11 +86,20 @@ method of finding websites (Google Maps, directories, your own research).
 ### Local dashboard
 
 ```bash
+python dashboard/manage_users.py init  # one-time setup: Tarun, Prabh, Uttkarsh
 python dashboard/run.py --no-open
 ```
 
 Open `http://127.0.0.1:8765/`. The dashboard binds to loopback only. Its run
-form accepts output files under `data/` or `output/` and seed files under
+and lead endpoints require one of the three accounts. Password hashes live in
+`data/dashboard-users.json`, which is excluded from Git; the server refuses to
+start until the accounts are provisioned. Rotate a password with
+`python dashboard/manage_users.py set-password tarun` (or `prabh` / `uttkarsh`).
+Rotation revokes active sessions. The dashboard uses a session cookie and
+CSRF token for run controls. Keep it on loopback. Access from another machine
+requires a separate secure deployment; do not expose the HTTP server directly.
+
+The dashboard's run form accepts output files under `data/` or `output/` and seed files under
 `data/`. Keep the CLI for output paths elsewhere. Choose **Search the web** to
 discover sites by industry or **Use a seed list** to scrape known URLs. The
 activity panel shows the current run and recovers its last status after a

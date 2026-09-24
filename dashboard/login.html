@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f6fb">
+  <title>Sign in · Lead Studio</title>
+  <link rel="stylesheet" href="/login.css">
+</head>
+<body>
+  <main class="login-layout">
+    <section class="intro" aria-labelledby="introTitle">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span><span>Lead Studio<small>Prospect workspace</small></span></div>
+      <div class="intro-copy"><p class="eyebrow">PRIVATE WORKSPACE</p><h1 id="introTitle">Your leads, in the right hands.</h1><p>Sign in to run scrapes, review contacts, and export your lead library.</p></div>
+      <div class="intro-footer">Local dashboard · Authorized team access</div>
+    </section>
+    <section class="form-side" aria-labelledby="loginTitle">
+      <div class="card">
+        <div class="card-icon" aria-hidden="true">↗</div>
+        <p class="eyebrow">WELCOME BACK</p>
+        <h2 id="loginTitle">Sign in to Lead Studio</h2>
+        <p class="card-subtitle">Use your assigned team credentials to continue.</p>
+        <form id="loginForm">
+          <label for="username">Account</label>
+          <select id="username" name="username" autocomplete="username" required><option value="">Choose an account</option><option value="tarun">Tarun</option><option value="prabh">Prabh</option><option value="uttkarsh">Uttkarsh</option></select>
+          <label for="password">Password</label>
+          <div class="password-wrap"><input id="password" name="password" type="password" autocomplete="current-password" required><button id="showPassword" type="button" aria-label="Show password">Show</button></div>
+          <p id="loginError" class="error" role="alert" hidden></p>
+          <button id="submit" class="submit" type="submit">Sign in <span aria-hidden="true">→</span></button>
+        </form>
+        <p class="help">Need a password reset? Ask the local dashboard administrator to run the account manager.</p>
+      </div>
+    </section>
+  </main>
+  <script src="/login.js"></script>
+</body>
+</html>

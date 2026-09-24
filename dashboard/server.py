@@ -14,6 +14,7 @@ Run via:  python dashboard/run.py
 from __future__ import annotations
 
 import csv
+import hmac
 import ipaddress
 import json
 import re
@@ -23,8 +24,11 @@ import threading
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
+from dashboard.auth import AuthStore, SESSION_SECONDS
 
 ROOT = Path(__file__).resolve().parent.parent
 DASH = Path(__file__).resolve().parent
@@ -610,14 +614,18 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
         for k, v in (extra or {}).items():
             self.send_header(k, v)
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj).encode(), "application/json")
+    def _json(self, obj, code=200, extra: dict | None = None):
+        self._send(code, json.dumps(obj).encode(), "application/json", extra)
 
     def _static(self, name: str):
         target = (DASH / name).resolve()
@@ -626,15 +634,69 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(200, target.read_bytes(), MIME.get(target.suffix, "application/octet-stream"))
 
+    def _cookie_token(self) -> str:
+        try:
+            cookies = SimpleCookie()
+            cookies.load(self.headers.get("Cookie", ""))
+            return cookies["lead_session"].value if "lead_session" in cookies else ""
+        except Exception:
+            return ""
+
+    def _session(self) -> dict | None:
+        return self.server.auth.session(self._cookie_token())
+
+    def _require_session(self, api: bool) -> dict | None:
+        session = self._session()
+        if session:
+            return session
+        if api:
+            self._json({"error": "login required"}, 401)
+        else:
+            self._send(303, b"", "text/plain", {"Location": "/login"})
+        return None
+
+    def _read_json(self) -> dict | None:
+        if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
+            self._json({"error": "JSON content type required"}, 415)
+            return None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._json({"error": "invalid content length"}, 400)
+            return None
+        if length < 1 or length > 4096:
+            self._json({"error": "invalid request body length"}, 413)
+            return None
+        try:
+            opts = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._json({"error": "invalid JSON body"}, 400)
+            return None
+        if not isinstance(opts, dict):
+            self._json({"error": "JSON object required"}, 400)
+            return None
+        return opts
+
     # -- routes
     def do_GET(self):
         if not self._same_origin():
             return self._json({"error": "local origin required"}, 403)
         path = urlparse(self.path).path
+        if path == "/login":
+            if self._session():
+                return self._send(303, b"", "text/plain", {"Location": "/"})
+            return self._static("login.html")
+        if path in ("/login.css", "/login.js"):
+            return self._static(path.lstrip("/"))
+        if not self._require_session(path.startswith("/api/") or path == "/export.csv"):
+            return
         if path in ("/", "/index.html"):
             return self._static("index.html")
         if path in ("/style.css", "/app.js"):
             return self._static(path.lstrip("/"))
+        if path == "/api/session":
+            session = self._session()
+            return self._json({"username": session["username"], "csrf": session["csrf"]})
         if path == "/api/status":
             return self._json(build_status())
         if path == "/api/leads":
@@ -673,23 +735,34 @@ class Handler(BaseHTTPRequestHandler):
         if not self._same_origin():
             return self._json({"error": "local origin required"}, 403)
         path = urlparse(self.path).path
-        if path not in ("/api/run", "/api/stop"):
+        if path not in ("/api/login", "/api/logout", "/api/run", "/api/stop"):
             return self._json({"error": "not found"}, 404)
-        if self.headers.get("Content-Type", "").split(";", 1)[0].lower() != "application/json":
-            return self._json({"error": "JSON content type required"}, 415)
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            return self._json({"error": "invalid content length"}, 400)
-        if length < 0 or length > 65536:
-            return self._json({"error": "request body too large"}, 413)
-        raw = self.rfile.read(length) if length else b""
-        try:
-            opts = json.loads(raw.decode()) if raw else {}
-        except (ValueError, UnicodeDecodeError):
-            return self._json({"error": "invalid JSON body"}, 400)
-        if not isinstance(opts, dict) or (path == "/api/run" and not raw):
-            return self._json({"error": "JSON object required"}, 400)
+        if path == "/api/login":
+            opts = self._read_json()
+            if opts is None:
+                return
+            username, password = opts.get("username"), opts.get("password")
+            if not isinstance(username, str) or not isinstance(password, str):
+                return self._json({"error": "invalid credentials"}, 401)
+            try:
+                result = self.server.auth.login(username, password, self.client_address[0])
+            except PermissionError:
+                return self._json({"error": "too many attempts; try again in 10 minutes"}, 429)
+            if not result:
+                return self._json({"error": "invalid credentials"}, 401)
+            token, _ = result
+            return self._json({"username": username.strip().lower()}, 200, {"Set-Cookie": f"lead_session={token}; Path=/; HttpOnly; SameSite=Strict"})
+        session = self._require_session(True)
+        if not session:
+            return
+        if not hmac.compare_digest(self.headers.get("X-CSRF-Token", ""), session["csrf"]):
+            return self._json({"error": "invalid request token"}, 403)
+        if path == "/api/logout":
+            self.server.auth.revoke(self._cookie_token())
+            return self._json({"ok": True}, 200, {"Set-Cookie": "lead_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"})
+        opts = self._read_json()
+        if opts is None:
+            return
         if path == "/api/run":
             ok, info = start_run(opts)
             return self._json(info, 200 if ok else 409)
@@ -704,6 +777,8 @@ def serve(host="127.0.0.1", port=8765, leads: str | None = None):
     if leads:
         _leads_override["path"] = leads
     load_persisted_log()
+    auth = AuthStore()
     srv = ThreadingHTTPServer((host, port), Handler)
+    srv.auth = auth
     srv.daemon_threads = True
     return srv

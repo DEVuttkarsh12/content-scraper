@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 pytest-of-*/
 dashboard/.last_run.log
+data/dashboard-users.json
 data/*.csv
 data/*.json
 data/*.xlsx

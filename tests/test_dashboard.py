@@ -4,12 +4,14 @@ import json
 import csv
 import io
 import threading
+from http.cookiejar import CookieJar
 from http.server import ThreadingHTTPServer
-from urllib.request import urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener
 
 import pytest
 
 import dashboard.server as server
+from dashboard.auth import AuthStore, provision
 
 
 class TestQuality:
@@ -219,15 +221,21 @@ def test_persisted_log_recovers_only_last_run(tmp_path, monkeypatch):
         server._log.clear(); server._log.extend(before_log)
 
 
-def test_dashboard_published_export_excludes_inferred(monkeypatch):
+def test_dashboard_published_export_excludes_inferred(monkeypatch, tmp_path):
     published = server._lead_from_any({"business_name": "Published", "website": "https://one.test", "emails": ["info@one.test"]})
     guessed = server._lead_from_any({"business_name": "Guessed", "website": "https://two.test", "emails": ["info@two.test"], "email_origin": "inferred"})
     monkeypatch.setattr(server, "load_leads", lambda: ([published, guessed], None))
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+    store = tmp_path / "users.json"
+    provision({"tarun": "test-pass", "prabh": "test-pass", "uttkarsh": "test-pass"}, store)
+    httpd.auth = AuthStore(store)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     try:
-        with urlopen(f"http://127.0.0.1:{httpd.server_port}/api/export.csv?published_only=1", timeout=3) as response:
+        url = f"http://127.0.0.1:{httpd.server_port}"
+        opener = build_opener(HTTPCookieProcessor(CookieJar()))
+        opener.open(Request(url + "/api/login", data=json.dumps({"username": "tarun", "password": "test-pass"}).encode(), headers={"Content-Type": "application/json"}), timeout=3).close()
+        with opener.open(url + "/api/export.csv?published_only=1", timeout=3) as response:
             rows = list(csv.DictReader(io.StringIO(response.read().decode("utf-8-sig"))))
         assert len(rows) == 1
         assert rows[0]["business_name"] == "Published"
