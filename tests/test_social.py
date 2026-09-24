@@ -1,5 +1,7 @@
 """Tests for sources.social: contact merging, handle/URL parsing, inference."""
 
+from types import SimpleNamespace
+
 from core.models import ContactInfo
 from sources.social import (
     EmailEnricher,
@@ -91,10 +93,19 @@ class TestEmailEnricher:
     def test_enrich_drops_invalid(self):
         enricher = EmailEnricher.__new__(EmailEnricher)
         enricher._available = True
+        enricher._settings = SimpleNamespace(verify_emails=True)
         enricher._is_valid = lambda email, strict=False: email == "good@x.com"
         contact = ContactInfo(emails=["good@x.com", "bad@x.com"])
         enriched = enricher.enrich(contact)
         assert enriched.emails == ["good@x.com"]
+
+    def test_disabled_mx_check_keeps_scraped_email(self):
+        enricher = EmailEnricher.__new__(EmailEnricher)
+        enricher._available = True
+        enricher._settings = SimpleNamespace(verify_emails=False)
+        enricher._is_valid = lambda *_args, **_kwargs: False
+        contact = ContactInfo(emails=["published@acme.com"])
+        assert enricher.enrich(contact).emails == ["published@acme.com"]
 
     def test_infer_skips_empty_domain(self):
         enricher = EmailEnricher.__new__(EmailEnricher)

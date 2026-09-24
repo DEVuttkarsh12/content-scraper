@@ -36,6 +36,11 @@ class TestLead:
         one_email = Lead("A", "saas", "https://a.com", emails=["info@a.com"])
         assert one_email.quality_score == 17
 
+    def test_guessed_mailboxes_do_not_get_scraped_email_score(self):
+        lead = Lead("A", "saas", "https://a.com", emails=["info@a.com", "sales@a.com"],
+                    email_origin="inferred")
+        assert lead.quality_score == 2
+
     def test_quality_band_boundaries(self):
         def score_label(emails=0, wa=0, ig=0, li=0, ph=0):
             lead = Lead(

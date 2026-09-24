@@ -1,6 +1,11 @@
 """Tests for sources.collector pure helper functions (no network)."""
 
+from types import SimpleNamespace
+
+import pytest
+
 from sources.collector import (
+    SearchSource,
     _candidate_score,
     _dedupe_urls,
     _extract_domain,
@@ -106,3 +111,36 @@ class TestOrderedContactUrls:
     def test_handles_relative_paths(self):
         urls = _ordered_contact_urls("https://acme.com/site/index.html", ["contact.html"])
         assert urls[0] == "https://acme.com/site/contact.html"
+
+    def test_rejects_cross_site_contact_links(self):
+        urls = _ordered_contact_urls("https://acme.com", ["//evil.test/contact", "https://evil.test/contact"])
+        assert all("evil.test" not in url for url in urls)
+
+
+def test_no_discovery_is_reported_as_failure(real_estate_niche):
+    source = SearchSource.__new__(SearchSource)
+    source.settings = SimpleNamespace(delay_between_requests=0)
+    source._discover = lambda *_args, **_kwargs: []
+    with pytest.raises(RuntimeError, match="No search results"):
+        source.collect(real_estate_niche)
+
+
+def test_js_shell_uses_rendered_text_for_scope(real_estate_niche):
+    source = SearchSource.__new__(SearchSource)
+    source.settings = SimpleNamespace(free_js_render=True, infer_emails=False)
+    source.enrich = False
+
+    class Response:
+        url = "https://acme.test/"
+        status_code = 200
+        headers = {"Content-Type": "text/html"}
+        text = "<html><head><title>Acme Realty</title></head><body>Enable JavaScript</body></html>"
+
+    ctx = SimpleNamespace(
+        session=SimpleNamespace(get=lambda _url: Response()),
+        renderer=SimpleNamespace(render_free=lambda _url: "Acme is a real estate brokerage. Email hello@acme.test"),
+    )
+    contact, name, final_url = source._process_url("https://acme.test/", real_estate_niche, ctx=ctx)
+    assert contact.emails == ["hello@acme.test"]
+    assert name == "Acme Realty"
+    assert final_url == "https://acme.test/"

@@ -10,11 +10,9 @@ from urllib.parse import unquote
 
 from core.models import ContactInfo
 
-# Email: pragmatic pattern, excludes images and common trap TLDs.
+# Email: accept current and future TLDs; the validator handles deliverability.
 EMAIL_RE = re.compile(
-    r"[\w.+-]+@[\w-]+\.(?:com|net|org|io|ca|co\.uk|co|me|info|biz|us|in|"
-    r"de|fr|es|it|au|nl|se|no|dk|fi|pl|cz|eu|ai|dev|agency|studio|site|"
-    r"online|business|company)\b",
+    r"[\w.+-]+@(?:[\w-]+\.)+[A-Za-z]{2,63}\b",
     re.IGNORECASE,
 )
 

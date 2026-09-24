@@ -53,6 +53,14 @@ class TestMerge:
         b = _make_lead(site="https://other.com")
         assert len(merge_leads([a], [b])) == 2
 
+    def test_duplicate_contacts_are_unioned(self):
+        old = _make_lead(emails=["info@acme.com"], ph=["15551234567"])
+        new = _make_lead(emails=["sales@acme.com"], ig=["acme"])
+        merged = merge_leads([new], [old])[0]
+        assert merged.emails == ["info@acme.com", "sales@acme.com"]
+        assert merged.phones == ["15551234567"]
+        assert merged.instagram_handles == ["acme"]
+
     def test_sorted_best_first(self):
         low_q = _make_lead()
         high_q = _make_lead(site="https://high.com", emails=["a@high.com", "b@high.com"])
@@ -126,6 +134,14 @@ class TestRoundTrip:
         out = tmp_path / "leads.json"
         out.write_text("{ definitely not json", encoding="utf-8")
         assert load_leads(str(out)) == []
+
+    def test_merge_refuses_to_overwrite_corrupt_file(self, tmp_path):
+        out = tmp_path / "leads.json"
+        original = "{ definitely not json"
+        out.write_text(original, encoding="utf-8")
+        with pytest.raises(ValueError, match="Cannot merge unreadable output"):
+            export_leads([_make_lead()], str(out), merge=True)
+        assert out.read_text(encoding="utf-8") == original
 
     def test_malformed_csv_does_not_raise(self, tmp_path):
         out = tmp_path / "leads.csv"

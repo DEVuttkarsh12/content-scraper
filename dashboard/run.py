@@ -49,7 +49,10 @@ def main(argv=None) -> int:
     parser.add_argument("--leads", default=None, help="override leads source file")
     args = parser.parse_args(argv)
 
-    srv = serve(host=args.host, port=args.port, leads=args.leads)
+    try:
+        srv = serve(host=args.host, port=args.port, leads=args.leads)
+    except ValueError as exc:
+        parser.error(str(exc))
     url = f"http://{args.host}:{args.port}/"
     print(f"\n  Lead Scraper dashboard  →  {url}")
     print(f"  interpreter             →  {sys.executable}")

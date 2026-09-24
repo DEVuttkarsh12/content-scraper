@@ -24,7 +24,6 @@ from sources.page import (
     anchor_links,
     contact_links,
     extract_business_name,
-    fetch_page,
     fetch_page_full,
     html_body_text,
     is_page_url,
@@ -255,10 +254,12 @@ class SearchSource:
         seen_urls: set = set()
         candidate_urls: list = []
         prior_domains = skip_domains or set()
+        discovered_any = False
 
         for query in niche.search_queries:
             logger.info("Searching: %r", query)
             urls = self._discover(query, num=20, niche=niche)
+            discovered_any = discovered_any or bool(urls)
             for item in urls:
                 url = item["url"] if isinstance(item, dict) else item
                 title = item.get("title", "") if isinstance(item, dict) else ""
@@ -274,6 +275,12 @@ class SearchSource:
                         continue
                     candidate_urls.append((url, query, title))
             time.sleep(self.settings.delay_between_requests)
+
+        if not discovered_any:
+            raise RuntimeError(
+                f"No search results for {niche.id}; free engines may be blocked. "
+                "Use --seeds or configure SERPAPI_KEY."
+            )
 
         if candidate_urls:
             # Rank candidates by niche relevance so the best matches are
@@ -308,13 +315,13 @@ class SearchSource:
                         break
                     url, query = future_to_query[future]
                     try:
-                        contact, name = future.result()
+                        contact, name, final_url = future.result()
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("Worker failed: %s", exc)
                         continue
                     if contact is None:
                         continue
-                    lead = self._make_lead(name, niche, url, contact, query)
+                    lead = self._make_lead(name, niche, final_url, contact, query)
                     if lead.has_contact:
                         leads.append(lead)
                         logger.debug("Lead: %s (%s contact points)",
@@ -323,10 +330,10 @@ class SearchSource:
             for url, query in candidate_urls:
                 if len(leads) >= max_leads:
                     break
-                contact, name = self._process_url(url, niche)
+                contact, name, final_url = self._process_url(url, niche)
                 if contact is None:
                     continue
-                lead = self._make_lead(name, niche, url, contact, query)
+                lead = self._make_lead(name, niche, final_url, contact, query)
                 if lead.has_contact:
                     leads.append(lead)
                     logger.debug("Lead: %s (%s contact points)", name, _contact_count(contact))
@@ -370,7 +377,7 @@ class SearchSource:
                         break
                     url = future_to_url[future]
                     try:
-                        contact, name = future.result()
+                        contact, name, final_url = future.result()
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("Seed worker failed: %s", exc)
                         continue
@@ -379,7 +386,7 @@ class SearchSource:
                     lead = Lead.from_contact(
                         business_name=name or "Unknown",
                         niche=niche.id,
-                        website=url,
+                        website=final_url,
                         contact=contact,
                         source_query="seed",
                     )
@@ -391,13 +398,13 @@ class SearchSource:
             for url in pending:
                 if len(leads) >= max_leads:
                     break
-                contact, name = self._process_url(url, niche)
+                contact, name, final_url = self._process_url(url, niche)
                 if contact is None:
                     continue
                 lead = Lead.from_contact(
                     business_name=name or "Unknown",
                     niche=niche.id,
-                    website=url,
+                    website=final_url,
                     contact=contact,
                     source_query="seed",
                 )
@@ -407,7 +414,7 @@ class SearchSource:
         return leads
 
     def _process_url(self, url: str, niche: Niche, *, ctx=None):
-        """Fetch + extract one URL. Returns (ContactInfo|None, name).
+        """Fetch + extract one URL. Returns (ContactInfo|None, name, final_url).
 
         *ctx* is an optional per-worker context (thread-local) carrying its
         own rate-limited session so concurrent workers never share mutable
@@ -416,47 +423,52 @@ class SearchSource:
         ctx = ctx or self
         logger.info("Probing %s", url)
         try:
-            html = fetch_page(ctx.session, ctx.renderer, url)
+            html, final_url = fetch_page_full(ctx.session, ctx.renderer, url)
         except Exception as exc:  # noqa: BLE001
             logger.debug("Skipping %s: %s", url, exc)
-            return None, None
+            return None, None, url
 
-        if not html:
+        if not html or not is_page_url(final_url) or url_is_denied(final_url):
             logger.debug("Empty page: %s", url)
-            return None, None
+            return None, None, final_url
 
         body = html_body_text(html)
+        rendered = None
+        if not is_valid_candidate_lead(body, niche) and self.settings.free_js_render and len(body) < 500:
+            rendered = ctx.renderer.render_free(final_url)
+            if rendered and is_valid_candidate_lead(rendered, niche):
+                body = rendered
         if not is_valid_candidate_lead(body, niche):
             logger.debug("Out of niche scope, skipping: %s", url)
-            return None, None
+            return None, None, final_url
         links = anchor_links(html)
         contact = extract_all(text=body, links=links)
         # Emails hidden from visible text: Cloudflare shields, %40 encoding.
         html_emails = extract_from_html(html)
         if html_emails.emails:
             contact = merge_contacts(contact, html_emails)
-        name = extract_business_name(html, fallback_url=url)
+        name = extract_business_name(html, fallback_url=final_url)
         if name_is_denied(name):
             logger.debug("Mega brand, skipping: %s", url)
-            return None, None
+            return None, None, final_url
 
         # Crawl contact pages when homepage has no emails.
         if not contact.emails:
-            crawler = self._crawl_contact_pages(url, niche, homepage_html=html, ctx=ctx)
+            crawler = self._crawl_contact_pages(final_url, niche, homepage_html=html, ctx=ctx)
             contact = merge_contacts(contact, crawler)
 
         # Free JS render fallback: JS-only sites yield nothing so far, so run
         # the page through the free jina.ai reader and pull emails from it.
         if self.settings.free_js_render and not contact.emails:
-            rendered = ctx.renderer.render_free(url)
+            rendered = rendered or ctx.renderer.render_free(final_url)
             if rendered:
                 extra = ContactInfo(emails=extract_emails(rendered))
                 if extra.emails:
                     contact = merge_contacts(contact, extra)
-                    logger.debug("Free-rendered %s found %d emails", url, len(extra.emails))
+                    logger.debug("Free-rendered %s found %d emails", final_url, len(extra.emails))
 
         # Social discovery: search for IG/LinkedIn when not found on-page.
-        domain = _extract_domain(url)
+        domain = _extract_domain(final_url)
         if self.enrich and domain:
             if not contact.instagram_handles:
                 ig_handles = self._discover_instagram(domain, ctx)
@@ -473,19 +485,17 @@ class SearchSource:
         if self.enrich and contact.emails:
             contact = ctx.email_enricher.enrich(contact)
 
-        # Last resort: the site published no valid email anywhere (form-only
-        # sites, JS-gated mailboxes). Synthesize generic mailboxes and keep
-        # only those that accept mail (real SMTP probe), so every lead still
-        # leaves the pipeline with a genuinely valid contact address.
-        if self.enrich and not contact.emails and domain:
+        # Optional guesses, clearly marked as inferred. An MX record only
+        # proves the domain accepts mail, not that any mailbox exists.
+        if self.enrich and self.settings.infer_emails and not contact.emails and domain:
             inferred = ctx.email_enricher.infer_emails(domain)
             if inferred:
                 contact = merge_contacts(
                     contact, ContactInfo(emails=inferred, email_origin="inferred")
                 )
-                logger.debug("Inferred valid mailboxes for %s: %s", domain, inferred)
+                logger.debug("Inferred unverified mailboxes for %s: %s", domain, inferred)
 
-        return contact, name
+        return contact, name, final_url
 
     def _crawl_contact_pages(self, base_url: str, niche: Niche,
                              homepage_html: str = "", ctx=None) -> ContactInfo:
@@ -518,6 +528,9 @@ class SearchSource:
                 logger.debug("Subpage crawl skipped %s: %s", sub_url, exc)
                 misses += 1
                 continue
+            if urlparse(final_url).hostname != urlparse(base_url).hostname:
+                misses += 1
+                continue
             # Skip pages that redirect onto an already-crawled URL — this
             # kills the /contact -> /contact-us/ re-fetch loop.
             if final_url in visited_final:
@@ -527,10 +540,9 @@ class SearchSource:
             if not html:
                 misses += 1
                 continue
+            # The homepage already established niche fit. Contact pages often
+            # contain only an address and email, with no niche keywords.
             body = html_body_text(html)
-            if not is_valid_candidate_lead(body, niche):
-                misses += 1
-                continue
             links = anchor_links(html)
             sub_contact = extract_all(text=body, links=links)
             html_emails = extract_from_html(html)
@@ -729,6 +741,8 @@ def _ordered_contact_urls(base_url: str, discovered: list) -> list:
     seen = set()
     for rel in list(discovered) + list(CONTACT_PATHS):
         abs_url = urljoin(base_url, rel)
+        if urlparse(abs_url).hostname != urlparse(base_url).hostname or not is_page_url(abs_url):
+            continue
         if abs_url in seen or abs_url == base_url.rstrip("/") + "/":
             continue
         seen.add(abs_url)
